@@ -1,0 +1,41 @@
+Read in entire jpeg save file to memory then close file.
+Hash map with file name key?
+Occasionally check (e.g. every 1 second) to see if contents of save dir have changed (e.g. new file added, file removed).
+    If yes, iterate dir contents.
+        For every file not in hashmap, read file and add to hash map
+        For every entry in hashmap not in dir, remove from hash map and free mem.
+Also need to check the File System's "date modified" field to see if a file need to be re-loaded.
+
+I'll also store the Datasets and APP13 segments as hash maps (maybe this is overkill).
+If the saving doesn't work (i.e. files don't show up in the game) then the order may matter and I may need to switch to arrays/vectors.
+
+Create a logging system and eventually in the UI have a window that can pop up to show warnings and errors.
+
+==============================
+APP13 DATA SEGMENT:
+marker - 2 bytes
+payload_size - 2 bytes
+identifier (usually "photoshop 3.0\0" but can be other things) - variable length
+type - 4 bytes ("8BIM" for photoshop version 4.0+)
+id - 2 bytes, "\004\004" for IPTC resource blocks but can be other things
+name - variable, padded to be even ("\0\0" if no name)
+data size - 4 bytes
+data - variable, padded to be even
+
+IMPORTANT: Should assert that the data size is even when writing!
+If we modify the IPTC blocks we need to make sure to pad the data with an extra null byte if its new
+length is odd!
+
+DATA SET (standard)
+tag - 1 byte (always 0x1C)
+record number - 1 byte (champs only uses record 2 - the application record)
+dataset number - (https://help.accusoft.com/ImageGear/v26.3/iptc-metadata-structure.html calls this the "item identifier")
+dataset size - 2 bytes (variable if size > 32768, but Champs doesn't use extended datasets)
+data - variable size
+
+Record 2 (Application Record) Datasets Used by CO (see https://help.accusoft.com/ImageGear/v26.3/iptc-metadata-structure.html):
+NOTE: Multiple datasets of the same item id can exist
+00 - RecordVersion, u16
+25 - Keywords, string - "FightClub", "FC", character gender
+120 - caption/abstract - account name, character name, costume hash
+202 - object data preview - actual costume data (hash is generated from this)
