@@ -3,26 +3,115 @@
 // https://doc.rust-lang.org/beta/std/io/struct.Bytes.html
 
 use byteorder::{ ByteOrder, BigEndian };
+use std::collections::HashMap;
 
-const JPEG_MARKER_SOI: u16 = 0xFFD8;
-const JPEG_MARKER_EOI: u16 = 0xFFD9;
-const JPEG_MARKER_SOF0: u16 = 0xFFC0;
-const JPEG_MARKER_SOF2: u16 = 0xFFC2;
-const JPEG_MARKER_DHT: u16 = 0xFFC4;
-const JPEG_MARKER_DQT: u16 = 0xFFDB;
-const JPEG_MARKER_DRI: u16 = 0xFFDD;
-const JPEG_MARKER_SOS: u16 = 0xFFDA;
-const JPEG_MARKER_COM: u16 = 0xFFFE;
-const JPEG_MARKER_RST_RANGE_BEGIN: u16 = 0xFFD0;
-const JPEG_MARKER_RST_RANGE_END: u16 = 0xFFD7;
-const JPEG_MARKER_APP_RANGE_BEGIN: u16 = 0xFFE0;
-const JPEG_MARKER_APP_RANGE_END: u16 = 0xFFEF;
+// TODO find a way to put these in an enum and use them
+const JPEG_MARKER_SOI: u8 = 0xD8;
+const JPEG_MARKER_EOI: u8 = 0xD9;
+const JPEG_MARKER_SOF0: u8 = 0xC0;
+const JPEG_MARKER_SOF2: u8 = 0xC2;
+const JPEG_MARKER_DHT: u8 = 0xC4;
+const JPEG_MARKER_DQT: u8 = 0xDB;
+const JPEG_MARKER_DRI: u8 = 0xDD;
+const JPEG_MARKER_SOS: u8 = 0xDA;
+const JPEG_MARKER_COM: u8 = 0xFE;
+const JPEG_MARKER_RST0: u8 = 0xD0;
+// const JPEG_MARKER_RST1: u8 = 0xD1;
+// const JPEG_MARKER_RST2: u8 = 0xD2;
+// const JPEG_MARKER_RST3: u8 = 0xD3;
+// const JPEG_MARKER_RST4: u8 = 0xD4;
+// const JPEG_MARKER_RST5: u8 = 0xD5;
+// const JPEG_MARKER_RST6: u8 = 0xD6;
+const JPEG_MARKER_RST7: u8 = 0xD7;
+const JPEG_MARKER_APP0: u8 = 0xE0;
+// const JPEG_MARKER_APP1: u8 = 0xE1;
+// const JPEG_MARKER_APP2: u8 = 0xE2;
+// const JPEG_MARKER_APP3: u8 = 0xE3;
+// const JPEG_MARKER_APP4: u8 = 0xE4;
+// const JPEG_MARKER_APP5: u8 = 0xE5;
+// const JPEG_MARKER_APP6: u8 = 0xE6;
+// const JPEG_MARKER_APP7: u8 = 0xE7;
+// const JPEG_MARKER_APP8: u8 = 0xE8;
+// const JPEG_MARKER_APP9: u8 = 0xE9;
+// const JPEG_MARKER_APP10: u8 = 0xEA;
+// const JPEG_MARKER_APP11: u8 = 0xEB;
+// const JPEG_MARKER_APP12: u8 = 0xEC;
+const JPEG_MARKER_APP13: u8 = 0xED;
+// const JPEG_MARKER_APP14: u8 = 0xEE;
+const JPEG_MARKER_APP15: u8 = 0xEF;
 
-// // TODO Does this need to be repr(packed) for easy writing?
-// // If it's not packed we can't just write the bytes straight to the file because of added padding.
-// struct IptcDataBlock {
-//     header: IptcDataBlockHeader,
-//     data: *const u8,
+// TODO better naming scheme for these
+const APP13_RECORD_APP_VERSION: u8 = 0;
+const APP13_RECORD_APP_KEYWORD: u8 = 25;
+const APP13_RECORD_APP_CAPTION: u8 = 120;
+const APP13_RECORD_APP_OBJECT_DATA_PREVIEW: u8 = 202;
+
+struct IptcDataSet {
+    record_number: u8,
+    data_set_number: u8,
+    data: Box<[u8]>,
+}
+
+#[allow(clippy::upper_case_acronyms)]
+// https://dev.exiv2.org/projects/exiv2/wiki/The_Metadata_in_JPEG_files
+enum JpegSegment {
+    Unknown { marker: u8, payload: Option<Box<[u8]>> },
+    SOI,
+    EOI,
+    RSTn { n: u8 },
+    SOF0 { payload: Box<[u8]> },
+    SOF2 { payload: Box<[u8]> },
+    DHT { payload: Box<[u8]> },
+    DQT { payload: Box<[u8]> },
+    DRI { payload: u16 },
+    // NOTE: When writing SOS segment data, the image data does NOT count as part of the payload length.
+    S0S { payload: Box<[u8]>, image_data: Box<[u8]> },
+    APPn { n: u8, payload: Box<[u8]> },
+    // https://metacpan.org/dist/Image-MetaData-JPEG/view/lib/Image/MetaData/JPEG/Structures.pod
+    // http://www.iptc.org/std/IIM/4.2/specification/IIMV4.2.pdf (page 14)
+    // NOTE: When writing APP13 segment data, it should always be padded with a null byte to an
+    // even length. If the data is already an even length, no null byte padding is needed.
+    APP13 {
+        // From what I've seen from CO, this is always "Photoshop 3.0\0"
+        // TODO CStr vs Box<[u8]>. CStr seems more self-documenting.
+        id: Box<std::ffi::CStr>,
+        // "8BIM" for photoshop 4.0+
+        resource_type: u32,
+        resource_id: u16,
+        // Padded to be even ("\0\0" if no name)
+        resource_name: Box<[u8]>,
+        // Technically the APP13 segment can contain multiple records but Champs only seems to use
+        // a single record: 2 - the application record.
+        // See notes for data set id meanings.
+        // key: data set number
+        // value: data set
+        // TODO Maybe swap out HashMap for https://crates.io/crates/fnv since the keys are so short.
+        // NOTE May need to find another data structure for this if there's ever a case where we
+        // have more than just the application record. Records must come in numeric order (datasets
+        // can come in any) but hashmaps are unordered and therefore extra care would have to be
+        // taken when writing records to a file. Could maybe do a vec of hashmaps but that seems
+        // like overkill...
+        data_sets: HashMap<u8, Vec<IptcDataSet>>
+    }
+}
+
+// // TODO maybe use this instead of the tagged union? Saves some space.
+// struct JpegSegment2 {
+//     marker: u8,
+//     payload: Option<Box<[u8]>>,
+//     additional_data: Option<Box<[u8]>>,
+// }
+
+// impl JpegSegment2 {
+//     // TODO return custom errors
+//     fn get_payload<T>(&self) -> Result<&T, ()>  {
+//         if let Some(payload) = self.payload.as_ref() {
+//             if payload.len() != std::mem::size_of::<T>() { return Err(()); }
+//             unsafe { Ok(&*(payload.as_ptr() as *const T)) }
+//         } else {
+//             Err(())
+//         }
+//     }
 // }
 
 fn main() {
@@ -30,13 +119,17 @@ fn main() {
     let jpeg_raw = std::fs::read(test_file).expect("failed to read");
     let mut offset = 0;
     loop {
-        let marker = BigEndian::read_u16(&jpeg_raw[offset..]);
-        offset += std::mem::size_of::<u16>();
+        let magic = jpeg_raw[offset];
+        debug_assert!(magic == 0xFF);
+        offset += 1;
+
+        let marker = jpeg_raw[offset];
+        offset += 1;
 
         let marker_payload_size = match marker {
             JPEG_MARKER_SOI
             | JPEG_MARKER_EOI
-            | JPEG_MARKER_RST_RANGE_BEGIN ..= JPEG_MARKER_RST_RANGE_END
+            | JPEG_MARKER_RST0 ..= JPEG_MARKER_RST7
             => { 0 }
 
             JPEG_MARKER_SOF0
@@ -46,7 +139,7 @@ fn main() {
             | JPEG_MARKER_DRI
             | JPEG_MARKER_SOS
             | JPEG_MARKER_COM
-            | JPEG_MARKER_APP_RANGE_BEGIN ..= JPEG_MARKER_APP_RANGE_END
+            | JPEG_MARKER_APP0 ..= JPEG_MARKER_APP15
             => { BigEndian::read_u16(&jpeg_raw[offset..]) },
 
             unknown_marker => { panic!("Unknown marker {:#06x} at offset {}", unknown_marker, offset) },
@@ -63,11 +156,11 @@ fn main() {
             offset += marker_payload_size as usize;
             // Skip all of the image data for now.
             while jpeg_raw[offset] != 0xFF
-            || matches!(BigEndian::read_u16(&jpeg_raw[offset..]), 0xFF00 | JPEG_MARKER_RST_RANGE_BEGIN ..= JPEG_MARKER_RST_RANGE_END)
+            || matches!(jpeg_raw[offset + 1], 0x00 | JPEG_MARKER_RST0 ..= JPEG_MARKER_RST7)
             {
                 offset += 1;
             }
-        } else if matches!(marker, JPEG_MARKER_APP_RANGE_BEGIN ..= JPEG_MARKER_APP_RANGE_END) && marker & 0xF == 13 {
+        } else if marker == JPEG_MARKER_APP13 {
             // FORMAT OF APP13 SEGMENT
             // marker - 2 bytes
             // payload_size - 2 bytes
