@@ -182,17 +182,24 @@ struct JpegApp13Payload {
     resource_name: Vec<u8>,
     // NOTE: When writing the data sets, the data must be padded with an additional \0 to remain
     // even!
+    //
     // Technically the APP13 segment can contain multiple records but Champs only seems to use
     // a single record: 2 - the application record.
     // See notes for data set id meanings.
     // key: data set number
     // value: data set
+    //
     // TODO Maybe swap out HashMap for https://crates.io/crates/fnv since the keys are so short.
     // NOTE May need to find another data structure for this if there's ever a case where we
     // have more than just the application record. Records must come in numeric order (datasets
     // can come in any) but hashmaps are unordered and therefore extra care would have to be
     // taken when writing records to a file. Could maybe do a vec of hashmaps but that seems
     // like overkill...
+    //
+    // TODO Look in to BTreeMap as a possible replacement for HashMap for app13 payload data sets.
+    // Technically there IS an ordering (records are ordered, datasets are not)
+    // https://users.rust-lang.org/t/quick-hashing-tiny-objects/60260
+    // https://www.reddit.com/r/rust/comments/7rgowj/hashmap_vs_btreemap/
     data_sets: HashMap<u8, Vec<IptcDataSet>>
 }
 
@@ -403,6 +410,9 @@ impl Jpeg {
     }
 }
 
+// TODO Figure out if there's a way to delineate account name vs character name vs costume hash
+// (they are all considered "caption" datasets in the application record) or if it's all purely
+// positional (e.g. account name is 1st, character name is 2nd, hash is 3rd)
 struct CostumeSaveFile(Jpeg);
 impl CostumeSaveFile {
     fn get_app13_payload(&self) -> &JpegApp13Payload {
