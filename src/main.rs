@@ -163,10 +163,14 @@ struct IptcDataSet {
     data: Box<[u8]>,
 }
 
+// TODO Maybe have a method for "packing" the payload into a format that's ready for writing to disk?
+trait SegmentPayload {}
+
 // https://metacpan.org/dist/Image-MetaData-JPEG/view/lib/Image/MetaData/JPEG/Structures.pod
 // http://www.iptc.org/std/IIM/4.2/specification/IIMV4.2.pdf (page 14)
 // NOTE: When writing APP13 segment data, it should always be padded with a null byte to an
 // even length. If the data is already an even length, no null byte padding is needed.
+// NOTE We do NOT account for _extended_ IPTC data sets!
 struct JpegApp13Payload {
     // From what I've seen from CO, this is always "Photoshop 3.0\0"
     // TODO CStr vs Box<[u8]>. CStr seems more self-documenting.
@@ -192,6 +196,8 @@ struct JpegApp13Payload {
     data_sets: HashMap<u8, Vec<IptcDataSet>>
 }
 
+impl SegmentPayload for JpegApp13Payload {}
+
 // https://dev.exiv2.org/projects/exiv2/wiki/The_Metadata_in_JPEG_files
 struct JpegSegment {
     segment_type: JpegSegmentType,
@@ -201,7 +207,7 @@ struct JpegSegment {
 
 impl JpegSegment {
     // TODO error handling
-    fn get_payload_as<T>(&self) -> &T {
+    fn get_payload_as<T: SegmentPayload>(&self) -> &T {
         unsafe { &*(self.payload.as_ref().unwrap().as_ptr() as *mut T) }
     }
 }
