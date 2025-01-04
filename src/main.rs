@@ -14,7 +14,7 @@
 // the image then send it to the GPU, idk what I'm talking about here).
 
 use byteorder::{ ByteOrder, BigEndian };
-use std::{collections::HashMap, fs};
+use std::collections::{ HashMap, BTreeMap };
 
 const JPEG_MARKER_SOI: u8 = 0xD8;
 const JPEG_MARKER_EOI: u8 = 0xD9;
@@ -152,6 +152,7 @@ impl From<JpegSegmentType> for u8 {
 }
 
 // TODO better naming scheme for these
+pub const APP13_RECORD_APP: u8 = 2;
 pub const APP13_RECORD_APP_VERSION: u8 = 0;
 pub const APP13_RECORD_APP_KEYWORD: u8 = 25;
 pub const APP13_RECORD_APP_CAPTION: u8 = 120;
@@ -159,11 +160,10 @@ pub const APP13_RECORD_APP_OBJECT_DATA_PREVIEW: u8 = 202;
 
 struct IptcDataSet {
     record_number: u8,
-    data_set_number: u8,
+    dataset_number: u8,
     data: Box<[u8]>,
 }
 
-// TODO Maybe have a method for "packing" the payload into a format that's ready for writing to disk?
 trait SegmentPayload {}
 
 // https://metacpan.org/dist/Image-MetaData-JPEG/view/lib/Image/MetaData/JPEG/Structures.pod
@@ -187,24 +187,31 @@ struct JpegApp13Payload {
     // Technically the APP13 segment can contain multiple records but Champs only seems to use
     // a single record: 2 - the application record.
     // See notes for data set id meanings.
-    // key: data set number
-    // value: data set
     //
-    // TODO Maybe swap out HashMap for https://crates.io/crates/fnv since the keys are so short.
-    // NOTE May need to find another data structure for this if there's ever a case where we
-    // have more than just the application record. Records must come in numeric order (datasets
-    // can come in any) but hashmaps are unordered and therefore extra care would have to be
-    // taken when writing records to a file. Could maybe do a vec of hashmaps but that seems
-    // like overkill...
-    //
-    // TODO Look in to BTreeMap as a possible replacement for HashMap for app13 payload data sets.
-    // Technically there IS an ordering (records are ordered, datasets are not)
-    // https://users.rust-lang.org/t/quick-hashing-tiny-objects/60260
-    // https://www.reddit.com/r/rust/comments/7rgowj/hashmap_vs_btreemap/
-    data_sets: HashMap<u8, Vec<IptcDataSet>>
+    // Key: u16, combination of u8 record # and u8 dataset #
+    // Value: Vec of datasets initially in the order that they were seen during unpacking.
+    datasets: BTreeMap<u16, Vec<IptcDataSet>>
 }
 
 impl SegmentPayload for JpegApp13Payload {}
+
+fn to_dataset_key(record_number: u8, dataset_number: u8) -> u16 {
+    (record_number as u16) << 8 | dataset_number as u16
+}
+
+impl JpegApp13Payload {
+    fn get_datasets(&self, record_number: u8, dataset_number: u8) -> Option<&Vec<IptcDataSet>> {
+        let key = to_dataset_key(record_number, dataset_number);
+        let result = self.datasets.get(&key);
+        result
+    }
+
+    fn get_datasets_mut(&mut self, record_number: u8, dataset_number: u8) -> Option<&mut Vec<IptcDataSet>> {
+        let key = to_dataset_key(record_number, dataset_number);
+        let result = self.datasets.get_mut(&key);
+        result
+    }
+}
 
 // https://dev.exiv2.org/projects/exiv2/wiki/The_Metadata_in_JPEG_files
 struct JpegSegment {
@@ -228,25 +235,28 @@ impl JpegSegment {
 
         match self.segment_type {
             // TODO There's probably a way to do this without allocating so much memory.
+            // Maybe we can find a way to calcalate the exact size of the segment, then just create
+            // a vec with that capacity and write directly into it. Might take a bit more
+            // computation but it may be better than repeated heap allocations.
             JpegSegmentType::APP13 => {
                 let payload = self.get_payload_as::<JpegApp13Payload>();
 
-                let mut packed_data_sets: Vec<u8> = Vec::new();
-                for (_, data_sets) in payload.data_sets.iter() {
-                    for data_set in data_sets {
+                let mut packed_datasets: Vec<u8> = Vec::new();
+                for (_, datasets) in payload.datasets.iter() {
+                    for dataset in datasets {
                         // TODO grep for IptcDataBlockHeader. Maybe pull that out of the function
                         // it currently lives in and reuse here? Can maybe add a function to create
                         // a header from an IptcDataSet.
-                        packed_data_sets.push(0x1C);
-                        packed_data_sets.push(data_set.record_number);
-                        packed_data_sets.push(data_set.data_set_number);
+                        packed_datasets.push(0x1C);
+                        packed_datasets.push(dataset.record_number);
+                        packed_datasets.push(dataset.dataset_number);
                         // NOTE the length of the data set data does NOT include the bytes used to
                         // report the length.
-                        packed_data_sets.extend((data_set.data.len() as u16).to_be_bytes());
-                        packed_data_sets.extend(data_set.data.clone());
+                        packed_datasets.extend((dataset.data.len() as u16).to_be_bytes());
+                        packed_datasets.extend(dataset.data.clone());
                     }
                 }
-                if packed_data_sets.len() % 2 == 1 { packed_data_sets.push(0); }
+                if packed_datasets.len() % 2 == 1 { packed_datasets.push(0); }
 
                 let mut packed_payload: Vec<u8> = vec![];
                 packed_payload.extend(payload.id.to_bytes_with_nul());
@@ -262,8 +272,8 @@ impl JpegSegment {
                     packed_payload.extend(payload.resource_name.clone());
                     if payload.resource_name.len() % 2 == 1 { packed_payload.push(0); }
                 }
-                packed_payload.extend((packed_data_sets.len() as u32).to_be_bytes());
-                packed_payload.extend(packed_data_sets);
+                packed_payload.extend((packed_datasets.len() as u32).to_be_bytes());
+                packed_payload.extend(packed_datasets);
 
                 packed_segment.extend(((packed_payload.len() + std::mem::size_of::<u16>()) as u16).to_be_bytes());
                 packed_segment.extend(packed_payload);
@@ -405,11 +415,11 @@ impl Jpeg {
                 struct IptcDataBlockHeader {
                     tag_marker: u8, // always 0x1C, can exclude?
                     record_number: u8,
-                    data_set_number: u8,
+                    dataset_number: u8,
                     data_size_bytes: u16,
                 }
 
-                let mut data_sets: HashMap<u8, Vec<IptcDataSet>> = HashMap::new();
+                let mut datasets = BTreeMap::new();
                 while jpeg_raw[offset] == 0x1C {
                     // UNSAFE: What if image is malformed and cuts out in the middle of trying to read a block?
                     // Also, may be unaligned? Probably will be unaligned.
@@ -421,10 +431,10 @@ impl Jpeg {
                     let data = &jpeg_raw[offset .. offset + header.data_size_bytes as usize];
                     offset += header.data_size_bytes as usize;
 
-
-                    data_sets.entry(header.data_set_number)
-                        .and_modify(|sets| sets.push(IptcDataSet { record_number: header.record_number, data_set_number: header.data_set_number, data: data.to_owned().into_boxed_slice() }))
-                        .or_insert(vec![IptcDataSet { record_number: header.record_number, data_set_number: header.data_set_number, data: data.to_owned().into_boxed_slice() }]);
+                    let key = to_dataset_key(header.record_number, header.dataset_number);
+                    datasets.entry(key)
+                        .and_modify(|sets: &mut Vec<IptcDataSet>| sets.push(IptcDataSet { record_number: header.record_number, dataset_number: header.dataset_number, data: data.to_owned().into_boxed_slice() }))
+                        .or_insert(vec![IptcDataSet { record_number: header.record_number, dataset_number: header.dataset_number, data: data.to_owned().into_boxed_slice() }]);
                     }
 
                 let payload = Box::new(JpegApp13Payload {
@@ -432,7 +442,7 @@ impl Jpeg {
                     resource_type,
                     resource_id,
                     resource_name: resource_name.to_owned(),
-                    data_sets,
+                    datasets,
                 });
                 let payload = unsafe { Box::from_raw(std::slice::from_raw_parts_mut(Box::into_raw(payload) as *mut u8, std::mem::size_of::<JpegApp13Payload>())) };
 
@@ -498,12 +508,9 @@ impl Jpeg {
     }
 }
 
-// TODO Figure out if there's a way to delineate account name vs character name vs costume hash
-// (they are all considered "caption" datasets in the application record) or if it's all purely
-// positional (e.g. account name is 1st, character name is 2nd, hash is 3rd)
-// NOTE Pretty sure it's just positional.
-//
 // TODO Error checking for things that get strings from raw bytes. Use from_utf8 instead of from_utf8_unchecked.
+// TODO Error checking wherever there's an unwrap (unless we're able to guarantee no failure ever)
+// TODO Slight refactors to DRY up code (the getters/setters have a lot in common)
 const ACCOUNT_NAME_INDEX: usize = 0;
 const CHARACTER_NAME_INDEX: usize = 1;
 const COSTUME_HASH_INDEX: usize = 2;
@@ -524,68 +531,64 @@ impl CostumeSaveFile {
 
     fn get_account_name(&self) -> &str {
         let app13 = self.get_app13_payload();
-        unsafe { std::str::from_utf8_unchecked(&app13.data_sets.get(&APP13_RECORD_APP_CAPTION).unwrap()[ACCOUNT_NAME_INDEX].data) }
+        let datasets = app13.get_datasets(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
+        let result = unsafe { std::str::from_utf8_unchecked(&datasets[ACCOUNT_NAME_INDEX].data) };
+        result
     }
 
     fn set_account_name(&mut self, value: String) {
-        self.get_app13_payload_mut()
-            .data_sets
-            .get_mut(&APP13_RECORD_APP_CAPTION)
-            .unwrap()[ACCOUNT_NAME_INDEX].data = value.into_bytes().into_boxed_slice();
+        let app13 = self.get_app13_payload_mut();
+        let datasets = app13.get_datasets_mut(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
+        datasets[ACCOUNT_NAME_INDEX].data = value.into_bytes().into_boxed_slice();
     }
 
     fn get_character_name(&self) -> &str {
         let app13 = self.get_app13_payload();
-        unsafe { std::str::from_utf8_unchecked(&app13.data_sets.get(&APP13_RECORD_APP_CAPTION).unwrap()[CHARACTER_NAME_INDEX].data) }
+        let datasets = app13.get_datasets(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
+        let result = unsafe { std::str::from_utf8_unchecked(&datasets[CHARACTER_NAME_INDEX].data) };
+        result
     }
 
     fn set_character_name(&mut self, value: String) {
-        self.get_app13_payload_mut()
-            .data_sets
-            .get_mut(&APP13_RECORD_APP_CAPTION)
-            .unwrap()[CHARACTER_NAME_INDEX].data = value.into_bytes().into_boxed_slice();
+        let app13 = self.get_app13_payload_mut();
+        let datasets = app13.get_datasets_mut(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
+        datasets[CHARACTER_NAME_INDEX].data = value.into_bytes().into_boxed_slice();
     }
 
     fn get_costume_hash(&self) -> &str {
         let app13 = self.get_app13_payload();
-        unsafe { std::str::from_utf8_unchecked(&app13.data_sets.get(&APP13_RECORD_APP_CAPTION).unwrap()[COSTUME_HASH_INDEX].data) }
+        let datasets = app13.get_datasets(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
+        let result = unsafe { std::str::from_utf8_unchecked(&datasets[COSTUME_HASH_INDEX].data) };
+        result
     }
 
     fn set_costume_hash(&mut self, value: String) {
-        self.get_app13_payload_mut()
-            .data_sets
-            .get_mut(&APP13_RECORD_APP_CAPTION)
-            .unwrap()[COSTUME_HASH_INDEX].data = value.into_bytes().into_boxed_slice();
+        let app13 = self.get_app13_payload_mut();
+        let datasets = app13.get_datasets_mut(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
+        datasets[COSTUME_HASH_INDEX].data = value.into_bytes().into_boxed_slice();
     }
 
     fn get_costume_spec(&self) -> &str {
         let app13 = self.get_app13_payload();
-        unsafe { std::str::from_utf8_unchecked(&app13.data_sets.get(&APP13_RECORD_APP_OBJECT_DATA_PREVIEW).unwrap()[0].data) }
+        let datasets = app13.get_datasets(APP13_RECORD_APP, APP13_RECORD_APP_OBJECT_DATA_PREVIEW).unwrap();
+        let result = unsafe { std::str::from_utf8_unchecked(&datasets[0].data) };
+        result
     }
 
     fn set_costume_spec(&mut self, value: String) {
-        self.get_app13_payload_mut()
-            .data_sets
-            .get_mut(&APP13_RECORD_APP_OBJECT_DATA_PREVIEW)
-            .unwrap()[0].data = value.into_bytes().into_boxed_slice();
+        let app13 = self.get_app13_payload_mut();
+        let datasets = app13.get_datasets_mut(APP13_RECORD_APP, APP13_RECORD_APP_OBJECT_DATA_PREVIEW).unwrap();
+        datasets[0].data = value.into_bytes().into_boxed_slice();
     }
 }
 
 fn main() {
     let test_file = std::env::var("TEST_FILE").expect("test file environment variable not found");
-    let jpeg_raw = std::fs::read(test_file).expect("failed to read");
+    let jpeg_raw = std::fs::read(test_file.clone()).expect("failed to read");
     let decoded = Jpeg::decode(jpeg_raw);
-    let costume_save = CostumeSaveFile(decoded);
+    let mut costume_save = CostumeSaveFile(decoded);
+    costume_save.set_character_name(String::from("New Character Name"));
+    costume_save.set_account_name(String::from("new_account_name"));
     let encoded = costume_save.0.encode();
-    _ = fs::write("./out.jpg", encoded);
-
-    // println!("{}", costume_save.get_account_name());
-    // println!("{}", costume_save.get_character_name());
-    // println!("{}", costume_save.get_costume_hash());
-    // costume_save.set_account_name(String::from("ryan"));
-    // costume_save.set_character_name(String::from("vedaradev"));
-    // costume_save.set_costume_hash(String::from("invalid hash"));
-    // println!("{}", costume_save.get_account_name());
-    // println!("{}", costume_save.get_character_name());
-    // println!("{}", costume_save.get_costume_hash());
+    _ = std::fs::write(test_file, encoded);
 }
