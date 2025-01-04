@@ -307,41 +307,41 @@ impl Jpeg {
             // NOTE: The size of the payload _includes_ the 2 bytes used for reporting the payload size
             let segment_payload_size = match segment_type {
                 JpegSegmentType::SOI
-                    | JpegSegmentType::EOI
-                    | JpegSegmentType::RST0
-                    | JpegSegmentType::RST1
-                    | JpegSegmentType::RST2
-                    | JpegSegmentType::RST3
-                    | JpegSegmentType::RST4
-                    | JpegSegmentType::RST5
-                    | JpegSegmentType::RST6
-                    | JpegSegmentType::RST7
-                    => { 0 }
+                | JpegSegmentType::EOI
+                | JpegSegmentType::RST0
+                | JpegSegmentType::RST1
+                | JpegSegmentType::RST2
+                | JpegSegmentType::RST3
+                | JpegSegmentType::RST4
+                | JpegSegmentType::RST5
+                | JpegSegmentType::RST6
+                | JpegSegmentType::RST7
+                => { 0 }
 
                 JpegSegmentType::SOF0
-                    | JpegSegmentType::SOF2
-                    | JpegSegmentType::DHT
-                    | JpegSegmentType::DQT
-                    | JpegSegmentType::DRI
-                    | JpegSegmentType::SOS
-                    | JpegSegmentType::COM
-                    | JpegSegmentType::APP0
-                    | JpegSegmentType::APP1
-                    | JpegSegmentType::APP2
-                    | JpegSegmentType::APP3
-                    | JpegSegmentType::APP4
-                    | JpegSegmentType::APP5
-                    | JpegSegmentType::APP6
-                    | JpegSegmentType::APP7
-                    | JpegSegmentType::APP8
-                    | JpegSegmentType::APP9
-                    | JpegSegmentType::APP10
-                    | JpegSegmentType::APP11
-                    | JpegSegmentType::APP12
-                    | JpegSegmentType::APP13
-                    | JpegSegmentType::APP14
-                    | JpegSegmentType::APP15
-                    => { BigEndian::read_u16(&jpeg_raw[offset..]) },
+                | JpegSegmentType::SOF2
+                | JpegSegmentType::DHT
+                | JpegSegmentType::DQT
+                | JpegSegmentType::DRI
+                | JpegSegmentType::SOS
+                | JpegSegmentType::COM
+                | JpegSegmentType::APP0
+                | JpegSegmentType::APP1
+                | JpegSegmentType::APP2
+                | JpegSegmentType::APP3
+                | JpegSegmentType::APP4
+                | JpegSegmentType::APP5
+                | JpegSegmentType::APP6
+                | JpegSegmentType::APP7
+                | JpegSegmentType::APP8
+                | JpegSegmentType::APP9
+                | JpegSegmentType::APP10
+                | JpegSegmentType::APP11
+                | JpegSegmentType::APP12
+                | JpegSegmentType::APP13
+                | JpegSegmentType::APP14
+                | JpegSegmentType::APP15
+                => { BigEndian::read_u16(&jpeg_raw[offset..]) },
             };
 
             if marker == JPEG_MARKER_SOS {
