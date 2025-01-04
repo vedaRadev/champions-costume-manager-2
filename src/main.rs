@@ -14,7 +14,7 @@
 // the image then send it to the GPU, idk what I'm talking about here).
 
 use byteorder::{ ByteOrder, BigEndian };
-use std::collections::HashMap;
+use std::{collections::HashMap, fs};
 
 const JPEG_MARKER_SOI: u8 = 0xD8;
 const JPEG_MARKER_EOI: u8 = 0xD9;
@@ -152,10 +152,10 @@ impl From<JpegSegmentType> for u8 {
 }
 
 // TODO better naming scheme for these
-const APP13_RECORD_APP_VERSION: u8 = 0;
-const APP13_RECORD_APP_KEYWORD: u8 = 25;
-const APP13_RECORD_APP_CAPTION: u8 = 120;
-const APP13_RECORD_APP_OBJECT_DATA_PREVIEW: u8 = 202;
+pub const APP13_RECORD_APP_VERSION: u8 = 0;
+pub const APP13_RECORD_APP_KEYWORD: u8 = 25;
+pub const APP13_RECORD_APP_CAPTION: u8 = 120;
+pub const APP13_RECORD_APP_OBJECT_DATA_PREVIEW: u8 = 202;
 
 struct IptcDataSet {
     record_number: u8,
@@ -179,6 +179,7 @@ struct JpegApp13Payload {
     resource_type: u32,
     resource_id: u16,
     // Padded to be even ("\0\0" if no name)
+    // TODO Maybe somehow enforce above whenever someone tries to change the resource name?
     resource_name: Vec<u8>,
     // NOTE: When writing the data sets, the data must be padded with an additional \0 to remain
     // even!
@@ -212,15 +213,74 @@ struct JpegSegment {
     additional_data: Option<Box<[u8]>>,
 }
 
+// FIXME need to guard against the payload not matching the segment type!
 impl JpegSegment {
-    // TODO error handling
     fn get_payload_as<T: SegmentPayload>(&self) -> &T {
         unsafe { &*(self.payload.as_ref().unwrap().as_ptr() as *mut T) }
     }
 
-    // TODO error handling
     fn get_payload_as_mut<T: SegmentPayload>(&mut self) -> &mut T {
         unsafe { &mut *(self.payload.as_mut().unwrap().as_ptr() as *mut T) }
+    }
+
+    fn pack(&self) -> Box<[u8]> {
+        let mut packed_segment = vec![0xFF, self.segment_type as u8];
+
+        match self.segment_type {
+            // TODO There's probably a way to do this without allocating so much memory.
+            JpegSegmentType::APP13 => {
+                let payload = self.get_payload_as::<JpegApp13Payload>();
+
+                let mut packed_data_sets: Vec<u8> = Vec::new();
+                for (_, data_sets) in payload.data_sets.iter() {
+                    for data_set in data_sets {
+                        // TODO grep for IptcDataBlockHeader. Maybe pull that out of the function
+                        // it currently lives in and reuse here? Can maybe add a function to create
+                        // a header from an IptcDataSet.
+                        packed_data_sets.push(0x1C);
+                        packed_data_sets.push(data_set.record_number);
+                        packed_data_sets.push(data_set.data_set_number);
+                        // NOTE the length of the data set data does NOT include the bytes used to
+                        // report the length.
+                        packed_data_sets.extend((data_set.data.len() as u16).to_be_bytes());
+                        packed_data_sets.extend(data_set.data.clone());
+                    }
+                }
+                if packed_data_sets.len() % 2 == 1 { packed_data_sets.push(0); }
+
+                let mut packed_payload: Vec<u8> = vec![];
+                packed_payload.extend(payload.id.to_bytes_with_nul());
+                packed_payload.extend((payload.resource_type).to_be_bytes());
+                packed_payload.extend((payload.resource_id).to_be_bytes());
+                // TODO See note on JpegApp13Payload resource_name field. If we _do_ end up
+                // providing a interface that must be used to get and set the resource name, then
+                // we don't need to enforce padding here.
+                if payload.resource_name.is_empty() {
+                    packed_payload.push(0);
+                    packed_payload.push(0);
+                } else {
+                    packed_payload.extend(payload.resource_name.clone());
+                    if payload.resource_name.len() % 2 == 1 { packed_payload.push(0); }
+                }
+                packed_payload.extend((packed_data_sets.len() as u32).to_be_bytes());
+                packed_payload.extend(packed_data_sets);
+
+                packed_segment.extend(((packed_payload.len() + std::mem::size_of::<u16>()) as u16).to_be_bytes());
+                packed_segment.extend(packed_payload);
+            },
+
+            _ => {
+                if let Some(payload) = &self.payload {
+                    packed_segment.extend(((payload.len() + std::mem::size_of::<u16>()) as u16).to_be_bytes());
+                    packed_segment.extend(payload);
+                }
+                if let Some(additional_data) = &self.additional_data {
+                    packed_segment.extend(additional_data);
+                }
+            }
+        }
+
+        packed_segment.into_boxed_slice()
     }
 }
 
@@ -285,10 +345,11 @@ impl Jpeg {
             };
 
             if marker == JPEG_MARKER_SOS {
-                let payload = jpeg_raw[offset .. offset + segment_payload_size as usize].to_owned().into_boxed_slice();
+                // NOTE Skip the 2 bytes used to report the length, we'll recalculate these when
+                // repacking
+                let payload = jpeg_raw[offset + 2 .. offset + segment_payload_size as usize].to_owned().into_boxed_slice();
                 offset += segment_payload_size as usize;
 
-                // let mut one_past_image_data_end = offset;
                 let image_data_start = offset;
                 // The marker magic number (0xFF) may be encountered within the image scan,
                 // specifically for 0xFF00 and 0xFFD0 - 0xFFD7 (RST). Keep scanning to find the start
@@ -388,7 +449,9 @@ impl Jpeg {
                 if jpeg_raw[offset] == 0 { offset += 1; }
             } else {
                 let payload = if segment_payload_size > 0 {
-                    Some(jpeg_raw[offset .. offset + segment_payload_size as usize].to_owned().into_boxed_slice())
+                    // NOTE Do NOT store the payload size in the payload bytes. We'll recalculate
+                    // it when repacking.
+                    Some(jpeg_raw[offset + 2 .. offset + segment_payload_size as usize].to_owned().into_boxed_slice())
                 } else {
                     None
                 };
@@ -406,6 +469,16 @@ impl Jpeg {
         }
 
         decoded
+    }
+
+    fn encode(&self) -> Box<[u8]> {
+        let mut encoded = vec![];
+        for segment in self.segments.iter() {
+            let packed_segment = segment.pack();
+            encoded.extend(packed_segment);
+        }
+
+        encoded.into_boxed_slice()
     }
 
     fn get_segment(&self, segment_type: JpegSegmentType) -> Option<Vec<&JpegSegment>> {
@@ -435,14 +508,15 @@ const ACCOUNT_NAME_INDEX: usize = 0;
 const CHARACTER_NAME_INDEX: usize = 1;
 const COSTUME_HASH_INDEX: usize = 2;
 struct CostumeSaveFile(Jpeg);
+#[allow(dead_code)]
 impl CostumeSaveFile {
     fn get_app13_payload(&self) -> &JpegApp13Payload {
-        self.0.get_segment(JpegSegmentType::APP13).unwrap()[0].get_payload_as::<JpegApp13Payload>()
+        let app13_segment = self.0.get_segment(JpegSegmentType::APP13).unwrap()[0];
+        let app13_payload = app13_segment.get_payload_as::<JpegApp13Payload>();
+        app13_payload
     }
 
     fn get_app13_payload_mut(&mut self) -> &mut JpegApp13Payload {
-        // TODO can I get the segment out without swap_remove? Getting from the index was giving me
-        // borrow checker errors.
         let app13_segment = self.0.get_segment_mut(JpegSegmentType::APP13).unwrap().swap_remove(0);
         let app13_payload = app13_segment.get_payload_as_mut::<JpegApp13Payload>();
         app13_payload
@@ -501,14 +575,17 @@ fn main() {
     let test_file = std::env::var("TEST_FILE").expect("test file environment variable not found");
     let jpeg_raw = std::fs::read(test_file).expect("failed to read");
     let decoded = Jpeg::decode(jpeg_raw);
-    let mut costume_save = CostumeSaveFile(decoded);
-    println!("{}", costume_save.get_account_name());
-    println!("{}", costume_save.get_character_name());
-    println!("{}", costume_save.get_costume_hash());
-    costume_save.set_account_name(String::from("ryan"));
-    costume_save.set_character_name(String::from("vedaradev"));
-    costume_save.set_costume_hash(String::from("invalid hash"));
-    println!("{}", costume_save.get_account_name());
-    println!("{}", costume_save.get_character_name());
-    println!("{}", costume_save.get_costume_hash());
+    let costume_save = CostumeSaveFile(decoded);
+    let encoded = costume_save.0.encode();
+    _ = fs::write("./out.jpg", encoded);
+
+    // println!("{}", costume_save.get_account_name());
+    // println!("{}", costume_save.get_character_name());
+    // println!("{}", costume_save.get_costume_hash());
+    // costume_save.set_account_name(String::from("ryan"));
+    // costume_save.set_character_name(String::from("vedaradev"));
+    // costume_save.set_costume_hash(String::from("invalid hash"));
+    // println!("{}", costume_save.get_account_name());
+    // println!("{}", costume_save.get_character_name());
+    // println!("{}", costume_save.get_costume_hash());
 }
