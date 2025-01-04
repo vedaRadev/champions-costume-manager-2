@@ -435,7 +435,7 @@ impl Jpeg {
                     datasets.entry(key)
                         .and_modify(|sets: &mut Vec<IptcDataSet>| sets.push(IptcDataSet { record_number: header.record_number, dataset_number: header.dataset_number, data: data.to_owned().into_boxed_slice() }))
                         .or_insert(vec![IptcDataSet { record_number: header.record_number, dataset_number: header.dataset_number, data: data.to_owned().into_boxed_slice() }]);
-                    }
+                }
 
                 let payload = Box::new(JpegApp13Payload {
                     id: std::ffi::CStr::from_bytes_with_nul(identifier).unwrap().into(),
