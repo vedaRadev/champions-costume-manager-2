@@ -158,7 +158,16 @@ pub const APP13_RECORD_APP_KEYWORD: u8 = 25;
 pub const APP13_RECORD_APP_CAPTION: u8 = 120;
 pub const APP13_RECORD_APP_OBJECT_DATA_PREVIEW: u8 = 202;
 
-struct IptcDataSet {
+#[repr(packed)]
+#[allow(dead_code)]
+struct PackedIptcDatasetHeader {
+    tag_marker: u8,
+    record_number: u8,
+    dataset_number: u8,
+    data_size_bytes: u16,
+}
+
+struct IptcDataset {
     record_number: u8,
     dataset_number: u8,
     data: Box<[u8]>,
@@ -190,7 +199,7 @@ struct JpegApp13Payload {
     //
     // Key: u16, combination of u8 record # and u8 dataset #
     // Value: Vec of datasets initially in the order that they were seen during unpacking.
-    datasets: BTreeMap<u16, Vec<IptcDataSet>>
+    datasets: BTreeMap<u16, Vec<IptcDataset>>
 }
 
 impl SegmentPayload for JpegApp13Payload {}
@@ -200,13 +209,13 @@ fn to_dataset_key(record_number: u8, dataset_number: u8) -> u16 {
 }
 
 impl JpegApp13Payload {
-    fn get_datasets(&self, record_number: u8, dataset_number: u8) -> Option<&Vec<IptcDataSet>> {
+    fn get_datasets(&self, record_number: u8, dataset_number: u8) -> Option<&Vec<IptcDataset>> {
         let key = to_dataset_key(record_number, dataset_number);
         let result = self.datasets.get(&key);
         result
     }
 
-    fn get_datasets_mut(&mut self, record_number: u8, dataset_number: u8) -> Option<&mut Vec<IptcDataSet>> {
+    fn get_datasets_mut(&mut self, record_number: u8, dataset_number: u8) -> Option<&mut Vec<IptcDataset>> {
         let key = to_dataset_key(record_number, dataset_number);
         let result = self.datasets.get_mut(&key);
         result
@@ -238,15 +247,18 @@ impl JpegSegment {
             // Maybe we can find a way to calcalate the exact size of the segment, then just create
             // a vec with that capacity and write directly into it. Might take a bit more
             // computation but it may be better than repeated heap allocations.
+            // TODO Eventually profile current method vs size calc then 1 heap alloc
+            // (we have a lot of pointers to heap-alloc'd data that we need to follow to get the
+            // sizes of things so traversing once to get sizes then alloc'ing then traversing again
+            // to copy/write data might not be cache-friendly, so we'd need to make sure that it
+            // really is better speed-wise and mem-wise).
             JpegSegmentType::APP13 => {
                 let payload = self.get_payload_as::<JpegApp13Payload>();
 
                 let mut packed_datasets: Vec<u8> = Vec::new();
                 for (_, datasets) in payload.datasets.iter() {
                     for dataset in datasets {
-                        // TODO grep for IptcDataBlockHeader. Maybe pull that out of the function
-                        // it currently lives in and reuse here? Can maybe add a function to create
-                        // a header from an IptcDataSet.
+                        // TODO maybe use PackedIptcDatasetHeader?
                         packed_datasets.push(0x1C);
                         packed_datasets.push(dataset.record_number);
                         packed_datasets.push(dataset.dataset_number);
@@ -410,22 +422,13 @@ impl Jpeg {
                 offset += 4;
 
                 // BEGIN READING IPTC DATA BLOCKS
-                #[repr(packed)]
-                #[allow(dead_code)]
-                struct IptcDataBlockHeader {
-                    tag_marker: u8, // always 0x1C, can exclude?
-                    record_number: u8,
-                    dataset_number: u8,
-                    data_size_bytes: u16,
-                }
-
                 let mut datasets = BTreeMap::new();
                 while jpeg_raw[offset] == 0x1C {
                     // UNSAFE: What if image is malformed and cuts out in the middle of trying to read a block?
                     // Also, may be unaligned? Probably will be unaligned.
                     // Although maybe it won't matter since the type we're casting to is repr(packed)...
-                    let header = unsafe { &mut *(jpeg_raw.as_ptr().add(offset) as *mut IptcDataBlockHeader) };
-                    offset += std::mem::size_of::<IptcDataBlockHeader>();
+                    let header = unsafe { &mut *(jpeg_raw.as_ptr().add(offset) as *mut PackedIptcDatasetHeader) };
+                    offset += std::mem::size_of::<PackedIptcDatasetHeader>();
                     // TODO will this screw up on platforms of different endianness?
                     header.data_size_bytes = header.data_size_bytes.to_be();
                     let data = &jpeg_raw[offset .. offset + header.data_size_bytes as usize];
@@ -433,8 +436,8 @@ impl Jpeg {
 
                     let key = to_dataset_key(header.record_number, header.dataset_number);
                     datasets.entry(key)
-                        .and_modify(|sets: &mut Vec<IptcDataSet>| sets.push(IptcDataSet { record_number: header.record_number, dataset_number: header.dataset_number, data: data.to_owned().into_boxed_slice() }))
-                        .or_insert(vec![IptcDataSet { record_number: header.record_number, dataset_number: header.dataset_number, data: data.to_owned().into_boxed_slice() }]);
+                        .and_modify(|sets: &mut Vec<IptcDataset>| sets.push(IptcDataset { record_number: header.record_number, dataset_number: header.dataset_number, data: data.to_owned().into_boxed_slice() }))
+                        .or_insert(vec![IptcDataset { record_number: header.record_number, dataset_number: header.dataset_number, data: data.to_owned().into_boxed_slice() }]);
                 }
 
                 let payload = Box::new(JpegApp13Payload {
