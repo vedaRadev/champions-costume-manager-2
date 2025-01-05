@@ -39,3 +39,14 @@ NOTE: Multiple datasets of the same item id can exist
 25 - Keywords, string - "FightClub", "FC", character gender
 120 - caption/abstract - account name, character name, costume hash
 202 - object data preview - actual costume data (hash is generated from this)
+
+==============================
+COSTUME SAVE FILENAMES
+
+The typical costume file name is: Costume_accountname_charactername_CC_Comic_page_Blue_J2000Timestamp.jpg.
+The ONLY required part of this file name is the prefix "Costume_".
+For in-game save display, the game pulls the account and character names from the metadata inside the jpeg itself, but
+it pulls the data from the J2000 timestamp in the file name. If the timestamp isn't present, the game will not display
+the date and time.
+This means that the user can rename their costume save to whatever they want; it just has to start with "Costume_" and
+optionally end with the J2000 timestamp if they want the datetime to appear in-game.
