@@ -9,6 +9,15 @@
 
 mod jpeg;
 
+use jpeg::{
+    Jpeg,
+    JpegSegmentType,
+    JpegApp13Payload,
+    APP13_RECORD_APP,
+    APP13_RECORD_APP_CAPTION,
+    APP13_RECORD_APP_OBJECT_DATA_PREVIEW,
+};
+
 // TODO Error checking for things that get strings from raw bytes. Use from_utf8 instead of from_utf8_unchecked.
 // TODO Error checking wherever there's an unwrap (unless we're able to guarantee no failure ever)
 // TODO Slight refactors to DRY up code (the getters/setters have a lot in common)
@@ -18,72 +27,72 @@ const COSTUME_HASH_INDEX: usize = 2;
 
 struct CostumeSaveFile {
     path: String,
-    jpeg: jpeg::Jpeg,
+    jpeg: Jpeg,
 }
 
 #[allow(dead_code)]
 impl CostumeSaveFile {
-    fn get_app13_payload(&self) -> &jpeg::JpegApp13Payload {
-        let app13_segment = self.jpeg.get_segment(jpeg::JpegSegmentType::APP13).unwrap()[0];
-        let app13_payload = app13_segment.get_payload_as::<jpeg::JpegApp13Payload>();
+    fn get_app13_payload(&self) -> &JpegApp13Payload {
+        let app13_segment = self.jpeg.get_segment(JpegSegmentType::APP13).unwrap()[0];
+        let app13_payload = app13_segment.get_payload_as::<JpegApp13Payload>();
         app13_payload
     }
 
-    fn get_app13_payload_mut(&mut self) -> &mut jpeg::JpegApp13Payload {
-        let app13_segment = self.jpeg.get_segment_mut(jpeg::JpegSegmentType::APP13).unwrap().swap_remove(0);
-        let app13_payload = app13_segment.get_payload_as_mut::<jpeg::JpegApp13Payload>();
+    fn get_app13_payload_mut(&mut self) -> &mut JpegApp13Payload {
+        let app13_segment = self.jpeg.get_segment_mut(JpegSegmentType::APP13).unwrap().swap_remove(0);
+        let app13_payload = app13_segment.get_payload_as_mut::<JpegApp13Payload>();
         app13_payload
     }
 
     fn get_account_name(&self) -> &str {
         let app13 = self.get_app13_payload();
-        let datasets = app13.get_datasets(jpeg::APP13_RECORD_APP, jpeg::APP13_RECORD_APP_CAPTION).unwrap();
+        let datasets = app13.get_datasets(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
         let result = unsafe { std::str::from_utf8_unchecked(&datasets[ACCOUNT_NAME_INDEX].data) };
         result
     }
 
     fn set_account_name(&mut self, value: String) {
         let app13 = self.get_app13_payload_mut();
-        let datasets = app13.get_datasets_mut(jpeg::APP13_RECORD_APP, jpeg::APP13_RECORD_APP_CAPTION).unwrap();
+        let datasets = app13.get_datasets_mut(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
         datasets[ACCOUNT_NAME_INDEX].data = value.into_bytes().into_boxed_slice();
     }
 
     fn get_character_name(&self) -> &str {
         let app13 = self.get_app13_payload();
-        let datasets = app13.get_datasets(jpeg::APP13_RECORD_APP, jpeg::APP13_RECORD_APP_CAPTION).unwrap();
+        let datasets = app13.get_datasets(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
         let result = unsafe { std::str::from_utf8_unchecked(&datasets[CHARACTER_NAME_INDEX].data) };
         result
     }
 
     fn set_character_name(&mut self, value: String) {
         let app13 = self.get_app13_payload_mut();
-        let datasets = app13.get_datasets_mut(jpeg::APP13_RECORD_APP, jpeg::APP13_RECORD_APP_CAPTION).unwrap();
+        let datasets = app13.get_datasets_mut(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
         datasets[CHARACTER_NAME_INDEX].data = value.into_bytes().into_boxed_slice();
     }
 
     fn get_costume_hash(&self) -> &str {
         let app13 = self.get_app13_payload();
-        let datasets = app13.get_datasets(jpeg::APP13_RECORD_APP, jpeg::APP13_RECORD_APP_CAPTION).unwrap();
+        let datasets = app13.get_datasets(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
         let result = unsafe { std::str::from_utf8_unchecked(&datasets[COSTUME_HASH_INDEX].data) };
         result
     }
 
     fn set_costume_hash(&mut self, value: String) {
         let app13 = self.get_app13_payload_mut();
-        let datasets = app13.get_datasets_mut(jpeg::APP13_RECORD_APP, jpeg::APP13_RECORD_APP_CAPTION).unwrap();
+        let datasets = app13.get_datasets_mut(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
         datasets[COSTUME_HASH_INDEX].data = value.into_bytes().into_boxed_slice();
     }
 
     fn get_costume_spec(&self) -> &str {
         let app13 = self.get_app13_payload();
-        let datasets = app13.get_datasets(jpeg::APP13_RECORD_APP, jpeg::APP13_RECORD_APP_OBJECT_DATA_PREVIEW).unwrap();
+        let datasets = app13.get_datasets(APP13_RECORD_APP, APP13_RECORD_APP_OBJECT_DATA_PREVIEW).unwrap();
         let result = unsafe { std::str::from_utf8_unchecked(&datasets[0].data) };
         result
     }
 
     fn set_costume_spec(&mut self, value: String) {
         let app13 = self.get_app13_payload_mut();
-        let datasets = app13.get_datasets_mut(jpeg::APP13_RECORD_APP, jpeg::APP13_RECORD_APP_OBJECT_DATA_PREVIEW).unwrap();
+        let datasets = app13.get_datasets_mut(APP13_RECORD_APP, APP13_RECORD_APP_OBJECT_DATA_PREVIEW).unwrap();
         datasets[0].data = value.into_bytes().into_boxed_slice();
     }
 
@@ -117,7 +126,7 @@ fn main() {
     let jpeg_raw = std::fs::read(test_file.clone()).expect("failed to read");
     let costume_save = CostumeSaveFile {
         path: test_file.clone(),
-        jpeg: jpeg::Jpeg::unpack(jpeg_raw),
+        jpeg: Jpeg::unpack(jpeg_raw),
     };
 
     println!("{}", costume_save.get_in_game_display_name());
