@@ -12,6 +12,8 @@
 // essentially what would happen if we decode the jpeg ourselves AND use a 3rd party lib to display
 // the image from the file [e.g. egui image widget] -- though the 3rd party lib might just decode
 // the image then send it to the GPU, idk what I'm talking about here).
+//
+// TODO Getting to the point where all the JPEG stuff should probably be pulled into its own file.
 
 use byteorder::{ ByteOrder, BigEndian };
 use std::collections::{ HashMap, BTreeMap };
@@ -312,9 +314,9 @@ struct Jpeg {
 }
 
 impl Jpeg {
-    fn decode(jpeg_raw: Vec<u8>) -> Self {
+    fn unpack(jpeg_raw: Vec<u8>) -> Self {
         let mut offset = 0;
-        let mut decoded = Self { segment_indices: HashMap::new(), segments: Vec::new() };
+        let mut unpacked = Self { segment_indices: HashMap::new(), segments: Vec::new() };
         loop {
             let magic = jpeg_raw[offset];
             debug_assert!(magic == 0xFF);
@@ -382,13 +384,13 @@ impl Jpeg {
                 let image_data = jpeg_raw[image_data_start .. offset].to_owned().into_boxed_slice();
 
                 let segment_type = JpegSegmentType::SOS;
-                let index = decoded.segments.len();
-                decoded.segments.push(JpegSegment {
+                let index = unpacked.segments.len();
+                unpacked.segments.push(JpegSegment {
                     segment_type,
                     payload: Some(payload),
                     additional_data: Some(image_data)
                 });
-                decoded.segment_indices.entry(segment_type).and_modify(|v| v.push(index)).or_insert(vec![index]);
+                unpacked.segment_indices.entry(segment_type).and_modify(|v| v.push(index)).or_insert(vec![index]);
             } else if marker == JPEG_MARKER_APP13 {
                 offset += 2; // advance past payload size bytes
 
@@ -450,13 +452,13 @@ impl Jpeg {
                 let payload = unsafe { Box::from_raw(std::slice::from_raw_parts_mut(Box::into_raw(payload) as *mut u8, std::mem::size_of::<JpegApp13Payload>())) };
 
                 let segment_type = JpegSegmentType::APP13;
-                let index = decoded.segments.len();
-                decoded.segments.push(JpegSegment {
+                let index = unpacked.segments.len();
+                unpacked.segments.push(JpegSegment {
                     segment_type,
                     payload: Some(payload),
                     additional_data: None,
                 });
-                decoded.segment_indices.entry(segment_type).and_modify(|v| v.push(index)).or_insert(vec![index]);
+                unpacked.segment_indices.entry(segment_type).and_modify(|v| v.push(index)).or_insert(vec![index]);
 
                 // remember that the whole app 13 segment payload is padded to be an even size
                 if jpeg_raw[offset] == 0 { offset += 1; }
@@ -469,7 +471,7 @@ impl Jpeg {
                     None
                 };
 
-                decoded.segments.push(JpegSegment {
+                unpacked.segments.push(JpegSegment {
                     segment_type,
                     payload,
                     additional_data: None,
@@ -481,10 +483,10 @@ impl Jpeg {
             if offset >= jpeg_raw.len() { break; }
         }
 
-        decoded
+        unpacked
     }
 
-    fn encode(&self) -> Box<[u8]> {
+    fn pack(&self) -> Box<[u8]> {
         let mut encoded = vec![];
         for segment in self.segments.iter() {
             let packed_segment = segment.pack();
@@ -588,10 +590,8 @@ impl CostumeSaveFile {
 fn main() {
     let test_file = std::env::var("TEST_FILE").expect("test file environment variable not found");
     let jpeg_raw = std::fs::read(test_file.clone()).expect("failed to read");
-    let decoded = Jpeg::decode(jpeg_raw);
-    let mut costume_save = CostumeSaveFile(decoded);
+    let mut costume_save = CostumeSaveFile(Jpeg::unpack(jpeg_raw));
     costume_save.set_character_name(String::from("New Character Name"));
     costume_save.set_account_name(String::from("new_account_name"));
-    let encoded = costume_save.0.encode();
-    _ = std::fs::write(test_file, encoded);
+    _ = std::fs::write(test_file, costume_save.0.pack());
 }
