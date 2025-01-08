@@ -251,6 +251,7 @@ fn main() {
         // B) rename the original file and exclude the timestamp
         //
         // Maybe updating the name of the file itself should be part of the CostumeSaveFile impl?
+        todo!();
     }
 
     if let Some(inspect_type) = app_args.inspect_type {
@@ -270,5 +271,6 @@ fn main() {
 
     if !app_args.dry_run {
         // TODO repack jpeg and update file
+        todo!();
     }
 }
