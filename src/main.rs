@@ -158,6 +158,7 @@ fn main() {
                 todo!();
             },
 
+            // TODO Should we allow for setting account names to empty strings?
             "--set-account-name" | "-a" => {
                 if app_args.new_account_name.is_some() {
                     eprintln!("Multiple account names specified");
@@ -170,6 +171,7 @@ fn main() {
                 });
             },
 
+            // TODO Should we allow for setting character names to empty strings?
             "--set-character-name" | "-c" => {
                 if app_args.new_character_name.is_some() {
                     eprintln!("Multiple character names specified");
