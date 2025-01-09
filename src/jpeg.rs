@@ -161,7 +161,7 @@ pub struct IptcDataset {
     pub data: Box<[u8]>,
 }
 
-trait SegmentPayload {}
+pub trait SegmentPayload {}
 
 // https://metacpan.org/dist/Image-MetaData-JPEG/view/lib/Image/MetaData/JPEG/Structures.pod
 // http://www.iptc.org/std/IIM/4.2/specification/IIMV4.2.pdf (page 14)
