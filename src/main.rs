@@ -26,8 +26,12 @@ const CHARACTER_NAME_INDEX: usize = 1;
 const COSTUME_HASH_INDEX: usize = 2;
 
 struct CostumeSaveFile {
-    path: String,
+    // TODO path should probably be stored as a PathBuf because we need to allow editing file names.
+    path: String, // TODO Should this be a cow?
     jpeg: Jpeg,
+    // For tracking if the file has been modified and needs to be written out.
+    // TODO is this hacky?
+    dirty: bool,
 }
 
 #[allow(dead_code)]
@@ -242,31 +246,49 @@ fn main() {
     // FIXME Jpeg unpacking should return a result, not just panic (see jpeg implementation)
     let costume_jpeg = Jpeg::unpack(jpeg_raw);
     let mut costume_save = CostumeSaveFile {
-        path: app_args.costume_save_file_path,
+        // FIXME unnecessary clone if user doesn't modify file name (should path be a cow string?)
+        // Maybe this one clone is fine... (piggy time)
+        path: app_args.costume_save_file_path.clone(),
         jpeg: costume_jpeg,
+        dirty: false,
     };
 
     if let Some(new_account_name) = app_args.new_account_name {
         costume_save.set_account_name(new_account_name);
+        costume_save.dirty = true;
     }
     if let Some(new_character_name) = app_args.new_character_name {
         costume_save.set_character_name(new_character_name);
+        costume_save.dirty = true;
     }
     if app_args.should_strip_timestamp {
-        // TODO
-        // Need to keep track of the original file name because we'll need to do one of the
-        // following:
-        // A) delete the original file then save a new file without the timestamp
-        // B) rename the original file and exclude the timestamp
-        //
-        // Maybe updating the name of the file itself should be part of the CostumeSaveFile impl?
-        todo!();
+        if costume_save.get_j2000_timestamp().is_some() {
+            // TODO Update CostumeSaveFile to store the path as a PathBuf and the pain of all this
+            // converting between str and String and OsStr goes away (at least a little)...
+            let mut new_path = std::path::PathBuf::from(costume_save.path);
+            // SAFETY: at this point we should have asserted that path has a valid file name.
+            let old_file_name = new_path.file_name().unwrap().to_str().unwrap();
+            // SAFETY: get_j2000_timestamp should only return a Some value if the last part of the
+            // file name is "_<j2000 timestamp>".
+            // FIXME: We lose the extension here! Is that okay if we just replace it later, or
+            // should we be more sophisticated in excising the timestamp?
+            let new_file_name = old_file_name.split_at(old_file_name.rfind('_').unwrap()).0.to_owned();
+            new_path.set_file_name(new_file_name);
+            // FIXME hardcoded, though we should never get this far if the file didn't have a .jpg
+            // extension in the first place.
+            new_path.set_extension("jpg");
+            costume_save.path = new_path.into_os_string().into_string().unwrap();
+            costume_save.dirty = true;
+        } else {
+            println!("WARNING: --strip-timestamp was specified but there is no value j2000 timestamp to strip from the filename");
+        }
     }
 
     if let Some(inspect_type) = app_args.inspect_type {
         let account_name = costume_save.get_account_name();
         let character_name = costume_save.get_character_name();
         let in_game_display = costume_save.get_in_game_display_name();
+        println!("File: {}", costume_save.path);
         println!(r#"Displayed in-game as: "{}""#, in_game_display);
         println!("Account: {}", account_name);
         println!("Character: {}", character_name);
@@ -278,8 +300,26 @@ fn main() {
         }
     }
 
-    if !app_args.dry_run {
-        // TODO repack jpeg and update file
-        todo!();
+    if !app_args.dry_run && costume_save.dirty {
+        let packed_data = costume_save.jpeg.pack();
+        println!();
+        if let Err(err) = std::fs::write(&costume_save.path, packed_data) {
+            eprintln!("failed to write file {}: {}", costume_save.path, err);
+            std::process::exit(1);
+        } else {
+            println!("wrote file {}", costume_save.path);
+        }
+        // TODO Copy over file creation time, set file updated time to now. Note that setting the
+        // file creation time is only available on windows!
+        // NOTE: This is only valid so long as the costume save stores the ENTIRE path, not just
+        // the name of the file!
+        if costume_save.path != app_args.costume_save_file_path {
+            if let Err(err) = std::fs::remove_file(&app_args.costume_save_file_path) {
+                eprintln!("failed to remove original file {}: {}", app_args.costume_save_file_path, err);
+                std::process::exit(1);
+            } else {
+                println!("removed file: {}", app_args.costume_save_file_path);
+            }
+        }
     }
 }
