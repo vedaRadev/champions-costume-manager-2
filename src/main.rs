@@ -29,9 +29,6 @@ struct CostumeSaveFile {
     // TODO path should probably be stored as a PathBuf because we need to allow editing file names.
     path: String, // TODO Should this be a cow?
     jpeg: Jpeg,
-    // For tracking if the file has been modified and needs to be written out.
-    // TODO is this hacky?
-    dirty: bool,
 }
 
 #[allow(dead_code)]
@@ -250,16 +247,16 @@ fn main() {
         // Maybe this one clone is fine... (piggy time)
         path: app_args.costume_save_file_path.clone(),
         jpeg: costume_jpeg,
-        dirty: false,
     };
 
+    let mut dirty = false;
     if let Some(new_account_name) = app_args.new_account_name {
         costume_save.set_account_name(new_account_name);
-        costume_save.dirty = true;
+        dirty = true;
     }
     if let Some(new_character_name) = app_args.new_character_name {
         costume_save.set_character_name(new_character_name);
-        costume_save.dirty = true;
+        dirty = true;
     }
     if app_args.should_strip_timestamp {
         if costume_save.get_j2000_timestamp().is_some() {
@@ -278,7 +275,7 @@ fn main() {
             // extension in the first place.
             new_path.set_extension("jpg");
             costume_save.path = new_path.into_os_string().into_string().unwrap();
-            costume_save.dirty = true;
+            dirty = true;
         } else {
             println!("WARNING: --strip-timestamp was specified but there is no value j2000 timestamp to strip from the filename");
         }
@@ -300,7 +297,7 @@ fn main() {
         }
     }
 
-    if !app_args.dry_run && costume_save.dirty {
+    if !app_args.dry_run && dirty {
         let packed_data = costume_save.jpeg.pack();
         println!();
         if let Err(err) = std::fs::write(&costume_save.path, packed_data) {
