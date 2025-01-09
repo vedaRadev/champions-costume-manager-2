@@ -146,6 +146,8 @@ struct AppArgs {
     inspect_type: Option<InspectType>,
     /// Should mutative options be ignored? Really only useful for seeing how potential changes
     /// will cause the save to appear in-game.
+    // TODO Should this be a "commit" (i.e. must include option to save changes) instead of a
+    // "dry-run" (i.e. include to NOT save changes)?
     dry_run: bool,
 }
 
@@ -226,6 +228,11 @@ fn main() {
                 app_args.costume_save_file_path = arg;
             },
         }
+    }
+
+    if app_args.costume_save_file_path.is_empty() {
+        eprintln!("Costume save file path is required");
+        std::process::exit(1);
     }
 
     let jpeg_raw = std::fs::read(&app_args.costume_save_file_path).unwrap_or_else(|err| {
