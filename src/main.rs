@@ -25,6 +25,9 @@ const ACCOUNT_NAME_INDEX: usize = 0;
 const CHARACTER_NAME_INDEX: usize = 1;
 const COSTUME_HASH_INDEX: usize = 2;
 
+// TODO store the filename and timestamp separately, can probably get rid of the path (unless we
+// want to store the path to the file's parent directory). Then will need to update the logic for
+// changing file name and stripping timestamp.
 struct CostumeSaveFile {
     // TODO path should probably be stored as a PathBuf because we need to allow editing file names.
     path: String, // TODO Should this be a cow?
@@ -137,6 +140,8 @@ struct AppArgs {
     new_account_name: Option<String>,
     /// New character name to set in costume jpeg metadata.
     new_character_name: Option<String>,
+    /// New file name to set excluding the "Costume_" prefix and j2000 timestamp postfix.
+    new_file_name: Option<String>,
     /// Whether or not to strip the J2000 timestamp from the end of the filename.
     should_strip_timestamp: bool,
     /// If costume metadata and in-game save display should be displayed. Defaults to short
@@ -163,6 +168,7 @@ fn main() {
 
             // TODO Should we allow for setting account names to empty strings?
             "--set-account-name" | "-a" => {
+                // TODO Do we really need to guard against this?
                 if app_args.new_account_name.is_some() {
                     eprintln!("Multiple account names specified");
                     std::process::exit(1);
@@ -176,6 +182,7 @@ fn main() {
 
             // TODO Should we allow for setting character names to empty strings?
             "--set-character-name" | "-c" => {
+                // TODO Do we really need to guard against this?
                 if app_args.new_character_name.is_some() {
                     eprintln!("Multiple character names specified");
                     std::process::exit(1);
@@ -183,6 +190,22 @@ fn main() {
 
                 app_args.new_character_name = raw_args.next().or_else(|| {
                     eprintln!("Unexpected end of input stream, expected character name");
+                    std::process::exit(1);
+                });
+            },
+
+            // TODO Maybe there's a better name to use here since we're not setting the FULL file
+            // name, just the part between "Costume_" and the timestamp (if there is one). Maybe
+            // documenting in the help string is enough.
+            "--set-file-name" | "-f" => {
+                // TODO Do we really need to guard against this?
+                if app_args.new_file_name.is_some() {
+                    eprintln!("Multiple file renames specified");
+                    std::process::exit(1);
+                }
+
+                app_args.new_file_name = raw_args.next().or_else(|| {
+                    eprintln!("Unexpected end of input stream, expected file name");
                     std::process::exit(1);
                 });
             },
@@ -256,6 +279,18 @@ fn main() {
     }
     if let Some(new_character_name) = app_args.new_character_name {
         costume_save.set_character_name(new_character_name);
+        dirty = true;
+    }
+    if let Some(new_file_name) = app_args.new_file_name {
+        let j2000_timestamp = costume_save.get_j2000_timestamp();
+        let mut new_path = std::path::PathBuf::from(costume_save.path);
+        if let Some(j2000_timestamp) = j2000_timestamp {
+            new_path.set_file_name(format!("Costume_{new_file_name}_{j2000_timestamp}"));
+        } else {
+            new_path.set_file_name(format!("Costume_{new_file_name}"));
+        }
+        new_path.set_extension("jpg");
+        costume_save.path = new_path.into_os_string().into_string().unwrap();
         dirty = true;
     }
     if app_args.should_strip_timestamp {
