@@ -29,9 +29,11 @@ const COSTUME_HASH_INDEX: usize = 2;
 // want to store the path to the file's parent directory). Then will need to update the logic for
 // changing file name and stripping timestamp.
 struct CostumeSaveFile {
-    // TODO path should probably be stored as a PathBuf because we need to allow editing file names.
-    path: String, // TODO Should this be a cow?
     jpeg: Jpeg,
+    /// The name of the save file as it appears between the "Costume_" prefix and j2000 timestamp
+    /// (if included) suffix.
+    save_name: String,
+    j2000_timestamp: Option<i64>,
 }
 
 #[allow(dead_code)]
@@ -101,21 +103,12 @@ impl CostumeSaveFile {
         datasets[0].data = value.into_bytes().into_boxed_slice();
     }
 
-    fn get_j2000_timestamp(&self) -> Option<i64> {
-        std::path::Path::new(&self.path)
-            .file_stem().unwrap()
-            .to_str().unwrap()
-            .split('_')
-            .last().unwrap()
-            .parse::<i64>().ok()
-    }
-
     // FIXME The max date that the game can display is 2068-01-19 03:14:07 but we don't handle this
     // edge case. Our simulated in-game display name datestring will go (almost) arbitrarily high.
     fn get_in_game_display_name(&self) -> String {
         let account_name = self.get_account_name();
         let character_name = self.get_character_name();
-        let maybe_datetime_string = self.get_j2000_timestamp().and_then(|j2000_timestamp| {
+        let maybe_datetime_string = self.j2000_timestamp.and_then(|j2000_timestamp| {
             const JAN_1_2000_UNIX_TIME: i64 = 946684800;
             let unix_timestamp = JAN_1_2000_UNIX_TIME + j2000_timestamp;
             chrono::DateTime::from_timestamp(unix_timestamp, 0)
@@ -128,6 +121,17 @@ impl CostumeSaveFile {
             format!("{}{}", account_name, character_name)
         }
     }
+
+    /// Constructs and returns the full file name in one of two forms:
+    /// A) If timestamp is present: "Costume_savename_timestamp.jpg"
+    /// B) If timestamp not present: "Costume_savename.jpg"
+    fn get_file_name(&self) -> String {
+        if let Some(j2000_timestamp) = self.j2000_timestamp {
+            format!("Costume_{}_{}.jpg", self.save_name, j2000_timestamp)
+        } else {
+            format!("Costume_{}.jpg", self.save_name)
+        }
+    }
 }
 
 enum InspectType { Short, Long }
@@ -135,13 +139,13 @@ enum InspectType { Short, Long }
 #[derive(Default)]
 struct AppArgs {
     /// Required. The file path of the costume save.
-    costume_save_file_path: String,
+    costume_save_file_path: Option<std::path::PathBuf>,
     /// New account name to set in costume jpeg metadata.
     new_account_name: Option<String>,
     /// New character name to set in costume jpeg metadata.
     new_character_name: Option<String>,
-    /// New file name to set excluding the "Costume_" prefix and j2000 timestamp postfix.
-    new_file_name: Option<String>,
+    /// New save name to set excluding the "Costume_" prefix and j2000 timestamp postfix.
+    new_save_name: Option<String>,
     /// Whether or not to strip the J2000 timestamp from the end of the filename.
     should_strip_timestamp: bool,
     /// If costume metadata and in-game save display should be displayed. Defaults to short
@@ -168,12 +172,6 @@ fn main() {
 
             // TODO Should we allow for setting account names to empty strings?
             "--set-account-name" | "-a" => {
-                // TODO Do we really need to guard against this?
-                if app_args.new_account_name.is_some() {
-                    eprintln!("Multiple account names specified");
-                    std::process::exit(1);
-                }
-
                 app_args.new_account_name = raw_args.next().or_else(|| {
                     eprintln!("Unexpected end of input stream, expected account name");
                     std::process::exit(1);
@@ -182,12 +180,6 @@ fn main() {
 
             // TODO Should we allow for setting character names to empty strings?
             "--set-character-name" | "-c" => {
-                // TODO Do we really need to guard against this?
-                if app_args.new_character_name.is_some() {
-                    eprintln!("Multiple character names specified");
-                    std::process::exit(1);
-                }
-
                 app_args.new_character_name = raw_args.next().or_else(|| {
                     eprintln!("Unexpected end of input stream, expected character name");
                     std::process::exit(1);
@@ -197,14 +189,8 @@ fn main() {
             // TODO Maybe there's a better name to use here since we're not setting the FULL file
             // name, just the part between "Costume_" and the timestamp (if there is one). Maybe
             // documenting in the help string is enough.
-            "--set-file-name" | "-f" => {
-                // TODO Do we really need to guard against this?
-                if app_args.new_file_name.is_some() {
-                    eprintln!("Multiple file renames specified");
-                    std::process::exit(1);
-                }
-
-                app_args.new_file_name = raw_args.next().or_else(|| {
+            "--set-save-name" | "-s" => {
+                app_args.new_save_name = raw_args.next().or_else(|| {
                     eprintln!("Unexpected end of input stream, expected file name");
                     std::process::exit(1);
                 });
@@ -244,32 +230,49 @@ fn main() {
                     std::process::exit(1);
                 }
 
-                if !app_args.costume_save_file_path.is_empty() {
+                if app_args.costume_save_file_path.is_some() {
                     eprintln!("Multiple files specified");
                     std::process::exit(1);
                 }
 
-                app_args.costume_save_file_path = arg;
+                app_args.costume_save_file_path = Some(std::path::PathBuf::from(arg));
             },
         }
     }
 
-    if app_args.costume_save_file_path.is_empty() {
+    if app_args.costume_save_file_path.is_none() {
         eprintln!("Costume save file path is required");
         std::process::exit(1);
     }
+    // TODO Validate costume_save_file_path here:
+    // 1) Starts with the "Costume_" prefix
+    // 2) Has a .jpg extension
+    // The game won't load the file if it doesn't have those two things anyway.
 
-    let jpeg_raw = std::fs::read(&app_args.costume_save_file_path).unwrap_or_else(|err| {
+    // SAFETY: costume_save_file_path has been determined to be a Some value at this point
+    let jpeg_raw = std::fs::read(app_args.costume_save_file_path.as_ref().unwrap()).unwrap_or_else(|err| {
         eprintln!("Failed to read costume jpeg: {}", err);
         std::process::exit(1);
     });
     // FIXME Jpeg unpacking should return a result, not just panic (see jpeg implementation)
     let costume_jpeg = Jpeg::unpack(jpeg_raw);
+    let file_stem = app_args.costume_save_file_path
+        .as_ref().unwrap()
+        .file_stem().unwrap()
+        .to_str().unwrap();
+    let j2000_timestamp = file_stem
+        .split('_')
+        .last().unwrap()
+        .parse::<i64>().ok();
+    let save_name = {
+        let save_name_start = file_stem.find("_").unwrap() + 1;
+        let save_name_end = if j2000_timestamp.is_some() { file_stem.rfind("_").unwrap() } else { file_stem.len() };
+        file_stem[save_name_start .. save_name_end].to_owned()
+    };
     let mut costume_save = CostumeSaveFile {
-        // FIXME unnecessary clone if user doesn't modify file name (should path be a cow string?)
-        // Maybe this one clone is fine... (piggy time)
-        path: app_args.costume_save_file_path.clone(),
         jpeg: costume_jpeg,
+        save_name,
+        j2000_timestamp,
     };
 
     let mut dirty = false;
@@ -281,46 +284,30 @@ fn main() {
         costume_save.set_character_name(new_character_name);
         dirty = true;
     }
-    if let Some(new_file_name) = app_args.new_file_name {
-        let j2000_timestamp = costume_save.get_j2000_timestamp();
-        let mut new_path = std::path::PathBuf::from(costume_save.path);
-        if let Some(j2000_timestamp) = j2000_timestamp {
-            new_path.set_file_name(format!("Costume_{new_file_name}_{j2000_timestamp}"));
-        } else {
-            new_path.set_file_name(format!("Costume_{new_file_name}"));
-        }
-        new_path.set_extension("jpg");
-        costume_save.path = new_path.into_os_string().into_string().unwrap();
+    if let Some(new_save_name) = app_args.new_save_name {
+        costume_save.save_name = new_save_name;
         dirty = true;
     }
     if app_args.should_strip_timestamp {
-        if costume_save.get_j2000_timestamp().is_some() {
-            // TODO Update CostumeSaveFile to store the path as a PathBuf and the pain of all this
-            // converting between str and String and OsStr goes away (at least a little)...
-            let mut new_path = std::path::PathBuf::from(costume_save.path);
-            // SAFETY: at this point we should have asserted that path has a valid file name.
-            let old_file_name = new_path.file_name().unwrap().to_str().unwrap();
-            // SAFETY: get_j2000_timestamp should only return a Some value if the last part of the
-            // file name is "_<j2000 timestamp>".
-            // FIXME: We lose the extension here! Is that okay if we just replace it later, or
-            // should we be more sophisticated in excising the timestamp?
-            let new_file_name = old_file_name.split_at(old_file_name.rfind('_').unwrap()).0.to_owned();
-            new_path.set_file_name(new_file_name);
-            // FIXME hardcoded, though we should never get this far if the file didn't have a .jpg
-            // extension in the first place.
-            new_path.set_extension("jpg");
-            costume_save.path = new_path.into_os_string().into_string().unwrap();
+        if costume_save.j2000_timestamp.is_some() {
+            costume_save.j2000_timestamp = None;
             dirty = true;
         } else {
-            println!("WARNING: --strip-timestamp was specified but there is no value j2000 timestamp to strip from the filename");
+            println!("WARNING: --strip-timestamp was specified but there is no j2000 timestamp to strip from the filename");
         }
     }
+
+    let costume_file_name = costume_save.get_file_name();
+    let full_path = app_args.costume_save_file_path
+        .as_ref().unwrap()
+        .parent().unwrap()
+        .join(costume_file_name);
 
     if let Some(inspect_type) = app_args.inspect_type {
         let account_name = costume_save.get_account_name();
         let character_name = costume_save.get_character_name();
         let in_game_display = costume_save.get_in_game_display_name();
-        println!("File: {}", costume_save.path);
+        println!("File: {}", full_path.to_str().unwrap());
         println!(r#"Displayed in-game as: "{}""#, in_game_display);
         println!("Account: {}", account_name);
         println!("Character: {}", character_name);
@@ -335,22 +322,22 @@ fn main() {
     if !app_args.dry_run && dirty {
         let packed_data = costume_save.jpeg.pack();
         println!();
-        if let Err(err) = std::fs::write(&costume_save.path, packed_data) {
-            eprintln!("failed to write file {}: {}", costume_save.path, err);
+        if let Err(err) = std::fs::write(&full_path, packed_data) {
+            eprintln!("failed to write file {:?}: {}", full_path, err);
             std::process::exit(1);
         } else {
-            println!("wrote file {}", costume_save.path);
+            println!("wrote file {:?}", full_path);
         }
         // TODO Copy over file creation time, set file updated time to now. Note that setting the
         // file creation time is only available on windows!
         // NOTE: This is only valid so long as the costume save stores the ENTIRE path, not just
         // the name of the file!
-        if costume_save.path != app_args.costume_save_file_path {
-            if let Err(err) = std::fs::remove_file(&app_args.costume_save_file_path) {
-                eprintln!("failed to remove original file {}: {}", app_args.costume_save_file_path, err);
+        if &full_path != app_args.costume_save_file_path.as_ref().unwrap() {
+            if let Err(err) = std::fs::remove_file(app_args.costume_save_file_path.as_ref().unwrap()) {
+                eprintln!("failed to remove original file {:?}: {}", app_args.costume_save_file_path, err);
                 std::process::exit(1);
             } else {
-                println!("removed file: {}", app_args.costume_save_file_path);
+                println!("removed file: {:?}", app_args.costume_save_file_path.unwrap());
             }
         }
     }
