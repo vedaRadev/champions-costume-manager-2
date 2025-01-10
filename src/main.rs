@@ -251,7 +251,7 @@ fn main() {
 
     // SAFETY: costume_save_file_path has been determined to be a Some value at this point
     let jpeg_raw = std::fs::read(app_args.costume_save_file_path.as_ref().unwrap()).unwrap_or_else(|err| {
-        eprintln!("Failed to read costume jpeg: {}", err);
+        eprintln!("Failed to read costume jpeg: {err}");
         std::process::exit(1);
     });
     // FIXME Jpeg unpacking should return a result, not just panic (see jpeg implementation)
@@ -320,21 +320,53 @@ fn main() {
     }
 
     if !app_args.dry_run && dirty {
-        let packed_data = costume_save.jpeg.pack();
         println!();
-        if let Err(err) = std::fs::write(&full_path, packed_data) {
-            eprintln!("failed to write file {:?}: {}", full_path, err);
+        use std::io::prelude::*;
+        let packed_data = costume_save.jpeg.pack();
+        let mut file = std::fs::File::create(&full_path).unwrap_or_else(|err| {
+            eprintln!("Failed to open {:?} for writing: {err}", full_path);
+            std::process::exit(1);
+        });
+        if let Err(err) = file.write_all(&packed_data) {
+            eprintln!("failed to write to file {:?}: {err}", full_path);
             std::process::exit(1);
         } else {
             println!("wrote file {:?}", full_path);
         }
-        // TODO Copy over file creation time, set file updated time to now. Note that setting the
-        // file creation time is only available on windows!
-        // NOTE: This is only valid so long as the costume save stores the ENTIRE path, not just
-        // the name of the file!
+
         if &full_path != app_args.costume_save_file_path.as_ref().unwrap() {
+            // Copy file creation time from old file to new file, not applicable on unix systems
+            // TODO If something fails when trying to copy file creation time from the old file to
+            // the new file, should we just continue instead of failing?
+            if cfg!(windows) {
+                use std::os::windows::fs::FileTimesExt;
+                let old_file = std::fs::File::open(app_args.costume_save_file_path.as_ref().unwrap()).unwrap_or_else(|err| {
+                    eprintln!("failed to open original file {:?} for reading: {err}", app_args.costume_save_file_path.as_ref().unwrap());
+                    std::process::exit(1);
+                });
+                let old_metadata = old_file.metadata().unwrap_or_else(|err| {
+                    eprintln!("failed to get metadata for original file {:?}: {err}", app_args.costume_save_file_path.as_ref().unwrap());
+                    std::process::exit(1);
+                });
+                let new_metadata = file.metadata().unwrap_or_else(|err| {
+                    eprintln!("failed to get metadata for new file {full_path:?}: {err}");
+                    std::process::exit(1);
+                });
+                // SAFETY: This section is conditionally compiled for windows so
+                // setting/getting the file creation time should not error.
+                let times = std::fs::FileTimes::new()
+                    .set_created(old_metadata.created().unwrap())
+                    .set_accessed(new_metadata.accessed().unwrap())
+                    .set_modified(new_metadata.modified().unwrap());
+                if let Err(err) = file.set_times(times) {
+                    eprintln!("failed to update filetimes for {full_path:?}: {err}");
+                    std::process::exit(1);
+                }
+                println!("updated filetimes for {full_path:?}");
+            }
+
             if let Err(err) = std::fs::remove_file(app_args.costume_save_file_path.as_ref().unwrap()) {
-                eprintln!("failed to remove original file {:?}: {}", app_args.costume_save_file_path, err);
+                eprintln!("failed to remove original file {:?}: {err}", app_args.costume_save_file_path);
                 std::process::exit(1);
             } else {
                 println!("removed file: {:?}", app_args.costume_save_file_path.unwrap());
