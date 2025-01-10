@@ -239,15 +239,20 @@ fn main() {
             },
         }
     }
-
+    
+    // filename validation
     if app_args.costume_save_file_path.is_none() {
         eprintln!("Costume save file path is required");
         std::process::exit(1);
     }
-    // TODO Validate costume_save_file_path here:
-    // 1) Starts with the "Costume_" prefix
-    // 2) Has a .jpg extension
-    // The game won't load the file if it doesn't have those two things anyway.
+    if !app_args.costume_save_file_path.as_ref().unwrap().file_stem().unwrap().to_string_lossy().starts_with("Costume_") {
+        eprintln!(r#"Invalid costume save file: file name must begin with "Costume_""#);
+        std::process::exit(1);
+    }
+    if app_args.costume_save_file_path.as_ref().unwrap().extension().is_none_or(|ext| ext.to_string_lossy().to_lowercase() != "jpg") {
+        eprintln!(r#"Invalid costume save file: must have ".jpg" extension"#);
+        std::process::exit(1);
+    }
 
     // SAFETY: costume_save_file_path has been determined to be a Some value at this point
     let jpeg_raw = std::fs::read(app_args.costume_save_file_path.as_ref().unwrap()).unwrap_or_else(|err| {
