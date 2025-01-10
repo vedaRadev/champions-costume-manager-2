@@ -25,9 +25,6 @@ const ACCOUNT_NAME_INDEX: usize = 0;
 const CHARACTER_NAME_INDEX: usize = 1;
 const COSTUME_HASH_INDEX: usize = 2;
 
-// TODO store the filename and timestamp separately, can probably get rid of the path (unless we
-// want to store the path to the file's parent directory). Then will need to update the logic for
-// changing file name and stripping timestamp.
 struct CostumeSaveFile {
     jpeg: Jpeg,
     /// The name of the save file as it appears between the "Costume_" prefix and j2000 timestamp
@@ -152,12 +149,10 @@ struct AppArgs {
     /// inspection, which does not include costume hash and costume specification. To specify long
     /// inspection, use "--inspect long". If specified with with mutative options such as
     /// --set-character-name or --strip-timestamp, the mutations are applied first then the
-    /// metadata is printed.
+    /// save is inspected.
     inspect_type: Option<InspectType>,
     /// Should mutative options be ignored? Really only useful for seeing how potential changes
     /// will cause the save to appear in-game.
-    // TODO Should this be a "commit" (i.e. must include option to save changes) instead of a
-    // "dry-run" (i.e. include to NOT save changes)?
     dry_run: bool,
 }
 
