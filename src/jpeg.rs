@@ -1,4 +1,3 @@
-// TODO Should all the JpegSegment data really be on the heap?
 // TODO Figure out how to construct Box<[u8]> directly instead of going through into_boxed_slice()
 
 // TODO get rid of the dependency on ByteOrder
@@ -79,17 +78,6 @@ pub enum JpegSegmentType {
 }
 
 pub struct UnknownSegmentError { marker: u8 }
-impl std::fmt::Debug for UnknownSegmentError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "Unrecognized jpeg marker: {:#02X}", self.marker)
-    }
-}
-impl std::fmt::Display for UnknownSegmentError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "Unrecognized jpeg marker: {:#02X}", self.marker)
-    }
-}
-impl std::error::Error for UnknownSegmentError {}
 
 // TODO maybe just impl From and return a JpegSegmentType::UNKNOWN on unrecognized marker?
 impl TryFrom<u8> for JpegSegmentType {
@@ -166,9 +154,8 @@ pub trait SegmentPayload {}
 
 // https://metacpan.org/dist/Image-MetaData-JPEG/view/lib/Image/MetaData/JPEG/Structures.pod
 // http://www.iptc.org/std/IIM/4.2/specification/IIMV4.2.pdf (page 14)
-// NOTE: When writing APP13 segment data, it should always be padded with a null byte to an
-// even length. If the data is already an even length, no null byte padding is needed.
 // NOTE We do NOT account for _extended_ IPTC data sets!
+impl SegmentPayload for JpegApp13Payload {}
 pub struct JpegApp13Payload {
     // From what I've seen from CO, this is always "Photoshop 3.0\0"
     // TODO CStr vs Box<[u8]>. CStr seems more self-documenting.
@@ -178,7 +165,7 @@ pub struct JpegApp13Payload {
     pub resource_id: u16,
     // Padded to be even ("\0\0" if no name)
     // TODO Maybe somehow enforce above whenever someone tries to change the resource name?
-    pub resource_name: Vec<u8>,
+    pub resource_name: Box<[u8]>,
     // NOTE: When writing the data sets, the data must be padded with an additional \0 to remain
     // even!
     //
@@ -191,21 +178,19 @@ pub struct JpegApp13Payload {
     datasets: BTreeMap<u16, Vec<IptcDataset>>
 }
 
-impl SegmentPayload for JpegApp13Payload {}
-
-fn to_dataset_key(record_number: u8, dataset_number: u8) -> u16 {
+fn to_iptc_dataset_key(record_number: u8, dataset_number: u8) -> u16 {
     (record_number as u16) << 8 | dataset_number as u16
 }
 
 impl JpegApp13Payload {
     pub fn get_datasets(&self, record_number: u8, dataset_number: u8) -> Option<&Vec<IptcDataset>> {
-        let key = to_dataset_key(record_number, dataset_number);
+        let key = to_iptc_dataset_key(record_number, dataset_number);
         let result = self.datasets.get(&key);
         result
     }
 
     pub fn get_datasets_mut(&mut self, record_number: u8, dataset_number: u8) -> Option<&mut Vec<IptcDataset>> {
-        let key = to_dataset_key(record_number, dataset_number);
+        let key = to_iptc_dataset_key(record_number, dataset_number);
         let result = self.datasets.get_mut(&key);
         result
     }
@@ -295,24 +280,38 @@ impl JpegSegment {
     }
 }
 
+#[derive(Debug)]
+pub enum UnpackingError {
+    /// Segment markers are always preceded by an 0xFF byte but we encountered something else.
+    InvalidSegmentMagic { magic: u8 },
+    /// We don't recognize or support the segment marker we encountered.
+    UnrecognizedSegmentMarker { marker: u8, offset: usize },
+    /// It was determined that there were not enough bytes left to read the segment payload.
+    PayloadInterrupted { marker: u8, payload_size: u16, offset: usize },
+    /// We tried to read some amount of data but there weren't enough bytes left.
+    UnexpectedEndOfStream { byte_length_tried: usize, offset: usize },
+    /// Something went wrong when attempting to parse segment-specific payload data.
+    MalformedSegmentPayload { marker: u8, offset: usize },
+}
+
 pub struct Jpeg {
+    // TODO swap out the hashing function for something faster (default isn't great for small keys)
     segment_indices: HashMap<JpegSegmentType, Vec<usize>>,
     segments: Vec<JpegSegment>
 }
 
+// TODO change semantics from unpack/pack to parse/serialize
 impl Jpeg {
-    pub fn unpack(jpeg_raw: Vec<u8>) -> Self {
+    pub fn unpack(jpeg_raw: Vec<u8>) -> Result<Self, UnpackingError>  {
         let mut offset = 0;
         let mut unpacked = Self { segment_indices: HashMap::new(), segments: Vec::new() };
         loop {
             let magic = jpeg_raw[offset];
-            debug_assert!(magic == 0xFF);
+            if magic != 0xFF { return Err(UnpackingError::InvalidSegmentMagic { magic }); }
             offset += 1;
 
-            let marker = jpeg_raw[offset];
-            let segment_type = JpegSegmentType::try_from(marker).unwrap_or_else(|_| {
-                panic!("Unknown marker {:#02X} at offset {}", marker, offset);
-            });
+            let marker = *jpeg_raw.get(offset).ok_or(UnpackingError::UnexpectedEndOfStream { byte_length_tried: 1, offset })?;
+            let segment_type = JpegSegmentType::try_from(marker).map_err(|err| UnpackingError::UnrecognizedSegmentMarker { marker: err.marker, offset })?;
             offset += 1;
 
             // NOTE: The size of the payload _includes_ the 2 bytes used for reporting the payload size
@@ -327,7 +326,7 @@ impl Jpeg {
                 | JpegSegmentType::RST5
                 | JpegSegmentType::RST6
                 | JpegSegmentType::RST7
-                => { 0 }
+                => { 0 },
 
                 JpegSegmentType::SOF0
                 | JpegSegmentType::SOF2
@@ -352,8 +351,22 @@ impl Jpeg {
                 | JpegSegmentType::APP13
                 | JpegSegmentType::APP14
                 | JpegSegmentType::APP15
-                => { BigEndian::read_u16(&jpeg_raw[offset..]) },
+                => {
+                    BigEndian::read_u16(
+                        jpeg_raw
+                            .get(offset .. offset + 2)
+                            .ok_or(UnpackingError::UnexpectedEndOfStream { byte_length_tried: 2, offset })?
+                    )
+                },
             };
+
+            if segment_payload_size > 0 && offset + segment_payload_size as usize >= jpeg_raw.len() {
+                return Err(UnpackingError::PayloadInterrupted {
+                    marker,
+                    payload_size: segment_payload_size,
+                    offset,
+                });
+            }
 
             match marker {
                 JPEG_MARKER_SOS => {
@@ -365,9 +378,12 @@ impl Jpeg {
                     // The marker magic number (0xFF) may be encountered within the image scan,
                     // specifically for 0xFF00 and 0xFFD0 - 0xFFD7 (RST). Keep scanning to find the start
                     // of the next segment, denoted by the same magic 0xFF.
-                    while jpeg_raw[offset] != 0xFF || matches!(jpeg_raw[offset + 1], 0x00 | JPEG_MARKER_RST0 ..= JPEG_MARKER_RST7) {
+                    while jpeg_raw.get(offset).is_some_and(|byte| *byte != 0xFF)
+                    || matches!(jpeg_raw.get(offset + 1), Some(0x00) | Some(JPEG_MARKER_RST0 ..= JPEG_MARKER_RST7))
+                    {
                         offset += 1;
                     }
+
                     let image_data = jpeg_raw[image_data_start .. offset].to_owned().into_boxed_slice();
 
                     let segment_type = JpegSegmentType::SOS;
@@ -383,6 +399,8 @@ impl Jpeg {
                 JPEG_MARKER_APP13 => {
                     offset += 2; // advance past payload size bytes
 
+                    // TODO SAFETY CHECK: What happens if identifier is malformed and not
+                    // null-terminated
                     let mut identifier_length = 1;
                     while jpeg_raw[offset + identifier_length - 1] != 0 { identifier_length += 1; }
                     let identifier = &jpeg_raw[offset .. offset + identifier_length];
@@ -394,6 +412,7 @@ impl Jpeg {
                     let resource_id = BigEndian::read_u16(&jpeg_raw[offset..]);
                     offset += 2;
 
+                    // TODO SAFETY CHECK: What happens if name is malformed and not null-terminated
                     let mut name_len = 1; // will always be at least 1 byte
                     while jpeg_raw[offset + name_len - 1] != 0 { name_len += 1; }
                     if name_len % 2 == 1 { name_len += 1; } // name is padded to be an even size
@@ -405,16 +424,22 @@ impl Jpeg {
 
                     // BEGIN READING IPTC DATA BLOCKS
                     let mut datasets: BTreeMap<u16, Vec<IptcDataset>> = BTreeMap::new();
-                    while jpeg_raw[offset] == 0x1C {
-                        // UNSAFE: What if image is malformed and cuts out in the middle of trying to read a block?
+                    const IPTC_DATASET_TAG_MARKER: u8 = 0x1C;
+                    while jpeg_raw[offset] == IPTC_DATASET_TAG_MARKER {
+                        // SAFETY: We've already determined that there are enough bytes left to
+                        // read the payload itself, therefore this cast shouldn't fall off the end
+                        // of the buffer.
                         let header = unsafe { &mut *(jpeg_raw.as_ptr().add(offset) as *mut PackedIptcDatasetHeader) };
                         offset += std::mem::size_of::<PackedIptcDatasetHeader>();
                         // TODO will this screw up on platforms of different endianness?
+                        // TODO find a better way to express what we're trying to do here: JPGs are
+                        // always stored big-endian so if we're on a little-endian architecture
+                        // then we need to swap the bytes to get the right value.
                         header.data_size_bytes = header.data_size_bytes.to_be();
                         let data = &jpeg_raw[offset .. offset + header.data_size_bytes as usize];
                         offset += header.data_size_bytes as usize;
 
-                        let key = to_dataset_key(header.record_number, header.dataset_number);
+                        let key = to_iptc_dataset_key(header.record_number, header.dataset_number);
                         let dataset = IptcDataset {
                             record_number: header.record_number,
                             dataset_number: header.dataset_number,
@@ -428,10 +453,12 @@ impl Jpeg {
                     }
 
                     let payload = Box::new(JpegApp13Payload {
+                        // SAFETY: We've already done checking to ensure that our identifier is
+                        // null-terminated and doesn't contain interior null bytes.
                         id: std::ffi::CStr::from_bytes_with_nul(identifier).unwrap().into(),
                         resource_type,
                         resource_id,
-                        resource_name: resource_name.to_owned(),
+                        resource_name: resource_name.to_owned().into_boxed_slice(),
                         datasets,
                     });
                     let payload = unsafe { Box::from_raw(std::slice::from_raw_parts_mut(Box::into_raw(payload) as *mut u8, std::mem::size_of::<JpegApp13Payload>())) };
@@ -451,8 +478,7 @@ impl Jpeg {
 
                 _ => {
                     let payload = if segment_payload_size > 0 {
-                        // NOTE Do NOT store the payload size in the payload bytes. We'll recalculate
-                        // it when repacking.
+                        // NOTE Do NOT store the payload size in the payload bytes. We'll recalculate it when repacking.
                         Some(jpeg_raw[offset + 2 .. offset + segment_payload_size as usize].to_owned().into_boxed_slice())
                     } else {
                         None
@@ -471,7 +497,9 @@ impl Jpeg {
             if offset >= jpeg_raw.len() { break; }
         }
 
-        unpacked
+        // TODO additional jpeg validation here
+
+        Ok(unpacked)
     }
 
     pub fn pack(&self) -> Box<[u8]> {
