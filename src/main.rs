@@ -35,6 +35,13 @@ struct CostumeSaveFile {
 
 #[allow(dead_code)]
 // TODO constructor that returns a result, maybe just take the file path and unpack from that.
+//
+// TODO save file validation
+// check app13 for the following (do testing and see if the game cares about any of this):
+// - identifier is "Photoshop 3.0\0"
+// - resource type is "8BIM" (as a u32)
+// - resource id is 0x0404
+// - resource name is "\0\0" 
 impl CostumeSaveFile {
     fn get_app13_payload(&self) -> &JpegApp13Payload {
         let app13_segment = self.jpeg.get_segment(JpegSegmentType::APP13).unwrap()[0];

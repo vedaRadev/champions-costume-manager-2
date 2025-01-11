@@ -1,6 +1,7 @@
 // TODO Should all the JpegSegment data really be on the heap?
 // TODO Figure out how to construct Box<[u8]> directly instead of going through into_boxed_slice()
 
+// TODO get rid of the dependency on ByteOrder
 use byteorder::{ ByteOrder, BigEndian };
 use std::collections::{ HashMap, BTreeMap };
 
@@ -354,116 +355,118 @@ impl Jpeg {
                 => { BigEndian::read_u16(&jpeg_raw[offset..]) },
             };
 
-            if marker == JPEG_MARKER_SOS {
-                // NOTE Skip the 2 bytes used to report the length, we'll recalculate these when repacking
-                let payload = jpeg_raw[offset + 2 .. offset + segment_payload_size as usize].to_owned().into_boxed_slice();
-                offset += segment_payload_size as usize;
+            match marker {
+                JPEG_MARKER_SOS => {
+                    // NOTE Skip the 2 bytes used to report the length, we'll recalculate these when repacking
+                    let payload = jpeg_raw[offset + 2 .. offset + segment_payload_size as usize].to_owned().into_boxed_slice();
+                    offset += segment_payload_size as usize;
 
-                let image_data_start = offset;
-                // The marker magic number (0xFF) may be encountered within the image scan,
-                // specifically for 0xFF00 and 0xFFD0 - 0xFFD7 (RST). Keep scanning to find the start
-                // of the next segment, denoted by the same magic 0xFF.
-                while jpeg_raw[offset] != 0xFF || matches!(jpeg_raw[offset + 1], 0x00 | JPEG_MARKER_RST0 ..= JPEG_MARKER_RST7) {
-                    offset += 1;
-                }
-                let image_data = jpeg_raw[image_data_start .. offset].to_owned().into_boxed_slice();
+                    let image_data_start = offset;
+                    // The marker magic number (0xFF) may be encountered within the image scan,
+                    // specifically for 0xFF00 and 0xFFD0 - 0xFFD7 (RST). Keep scanning to find the start
+                    // of the next segment, denoted by the same magic 0xFF.
+                    while jpeg_raw[offset] != 0xFF || matches!(jpeg_raw[offset + 1], 0x00 | JPEG_MARKER_RST0 ..= JPEG_MARKER_RST7) {
+                        offset += 1;
+                    }
+                    let image_data = jpeg_raw[image_data_start .. offset].to_owned().into_boxed_slice();
 
-                let segment_type = JpegSegmentType::SOS;
-                let index = unpacked.segments.len();
-                unpacked.segments.push(JpegSegment {
-                    segment_type,
-                    payload: Some(payload),
-                    additional_data: Some(image_data)
-                });
-                unpacked.segment_indices.entry(segment_type).and_modify(|v| v.push(index)).or_insert(vec![index]);
-            } else if marker == JPEG_MARKER_APP13 {
-                offset += 2; // advance past payload size bytes
+                    let segment_type = JpegSegmentType::SOS;
+                    let index = unpacked.segments.len();
+                    unpacked.segments.push(JpegSegment {
+                        segment_type,
+                        payload: Some(payload),
+                        additional_data: Some(image_data)
+                    });
+                    unpacked.segment_indices.entry(segment_type).and_modify(|v| v.push(index)).or_insert(vec![index]);
+                },
 
-                // Kind of just skipping all of the following for now, but later on we'll want to save
-                // all this information so we can reconstruct a valid jpeg image file when writing data
-                // back to disk.
-                let expected_identifier = b"Photoshop 3.0\0";
-                let identifier = &jpeg_raw[offset .. offset + expected_identifier.len()];
-                debug_assert!(identifier == expected_identifier);
-                offset += expected_identifier.len();
+                JPEG_MARKER_APP13 => {
+                    offset += 2; // advance past payload size bytes
 
-                let expected_resource_type: u32 = BigEndian::read_u32(b"8BIM");
-                let resource_type = BigEndian::read_u32(&jpeg_raw[offset .. offset + 4]);
-                debug_assert!(resource_type == expected_resource_type);
-                offset += 4;
+                    let mut identifier_length = 1;
+                    while jpeg_raw[offset + identifier_length - 1] != 0 { identifier_length += 1; }
+                    let identifier = &jpeg_raw[offset .. offset + identifier_length];
+                    offset += identifier_length;
 
-                let expected_id = 0x0404;
-                let resource_id = BigEndian::read_u16(&jpeg_raw[offset..]);
-                debug_assert!(resource_id == expected_id);
-                offset += 2;
+                    let resource_type = BigEndian::read_u32(&jpeg_raw[offset .. offset + 4]);
+                    offset += 4;
 
-                let mut name_len = 1; // will always be at least 
-                while jpeg_raw[offset + name_len - 1] != 0 { name_len += 1; }
-                if name_len % 2 == 1 { name_len += 1; } // name is padded to be an even size
-                let resource_name = &jpeg_raw[offset .. offset + name_len];
-                debug_assert!(resource_name == b"\0\0"); // only in the case of CO costume saves it seems...
-                offset += name_len;
+                    let resource_id = BigEndian::read_u16(&jpeg_raw[offset..]);
+                    offset += 2;
 
-                // unused now but will be important when writing back to disk!
-                let _data_size = BigEndian::read_u32(&jpeg_raw[offset..]);
-                offset += 4;
+                    let mut name_len = 1; // will always be at least 1 byte
+                    while jpeg_raw[offset + name_len - 1] != 0 { name_len += 1; }
+                    if name_len % 2 == 1 { name_len += 1; } // name is padded to be an even size
+                    let resource_name = &jpeg_raw[offset .. offset + name_len];
+                    offset += name_len;
 
-                // BEGIN READING IPTC DATA BLOCKS
-                let mut datasets = BTreeMap::new();
-                while jpeg_raw[offset] == 0x1C {
-                    // UNSAFE: What if image is malformed and cuts out in the middle of trying to read a block?
-                    // Also, may be unaligned? Probably will be unaligned.
-                    // Although maybe it won't matter since the type we're casting to is repr(packed)...
-                    let header = unsafe { &mut *(jpeg_raw.as_ptr().add(offset) as *mut PackedIptcDatasetHeader) };
-                    offset += std::mem::size_of::<PackedIptcDatasetHeader>();
-                    // TODO will this screw up on platforms of different endianness?
-                    header.data_size_bytes = header.data_size_bytes.to_be();
-                    let data = &jpeg_raw[offset .. offset + header.data_size_bytes as usize];
-                    offset += header.data_size_bytes as usize;
+                    // skip past the data size since we're going to recompute it when repacking
+                    offset += 4;
 
-                    let key = to_dataset_key(header.record_number, header.dataset_number);
-                    datasets.entry(key)
-                        .and_modify(|sets: &mut Vec<IptcDataset>| sets.push(IptcDataset { record_number: header.record_number, dataset_number: header.dataset_number, data: data.to_owned().into_boxed_slice() }))
-                        .or_insert(vec![IptcDataset { record_number: header.record_number, dataset_number: header.dataset_number, data: data.to_owned().into_boxed_slice() }]);
-                }
+                    // BEGIN READING IPTC DATA BLOCKS
+                    let mut datasets: BTreeMap<u16, Vec<IptcDataset>> = BTreeMap::new();
+                    while jpeg_raw[offset] == 0x1C {
+                        // UNSAFE: What if image is malformed and cuts out in the middle of trying to read a block?
+                        let header = unsafe { &mut *(jpeg_raw.as_ptr().add(offset) as *mut PackedIptcDatasetHeader) };
+                        offset += std::mem::size_of::<PackedIptcDatasetHeader>();
+                        // TODO will this screw up on platforms of different endianness?
+                        header.data_size_bytes = header.data_size_bytes.to_be();
+                        let data = &jpeg_raw[offset .. offset + header.data_size_bytes as usize];
+                        offset += header.data_size_bytes as usize;
 
-                let payload = Box::new(JpegApp13Payload {
-                    id: std::ffi::CStr::from_bytes_with_nul(identifier).unwrap().into(),
-                    resource_type,
-                    resource_id,
-                    resource_name: resource_name.to_owned(),
-                    datasets,
-                });
-                let payload = unsafe { Box::from_raw(std::slice::from_raw_parts_mut(Box::into_raw(payload) as *mut u8, std::mem::size_of::<JpegApp13Payload>())) };
+                        let key = to_dataset_key(header.record_number, header.dataset_number);
+                        let dataset = IptcDataset {
+                            record_number: header.record_number,
+                            dataset_number: header.dataset_number,
+                            data: data.to_owned().into_boxed_slice()
+                        };
+                        if let Some(sets) = datasets.get_mut(&key) {
+                            sets.push(dataset);
+                        } else {
+                            datasets.insert(key, vec![dataset]);
+                        }
+                    }
 
-                let segment_type = JpegSegmentType::APP13;
-                let index = unpacked.segments.len();
-                unpacked.segments.push(JpegSegment {
-                    segment_type,
-                    payload: Some(payload),
-                    additional_data: None,
-                });
-                unpacked.segment_indices.entry(segment_type).and_modify(|v| v.push(index)).or_insert(vec![index]);
+                    let payload = Box::new(JpegApp13Payload {
+                        id: std::ffi::CStr::from_bytes_with_nul(identifier).unwrap().into(),
+                        resource_type,
+                        resource_id,
+                        resource_name: resource_name.to_owned(),
+                        datasets,
+                    });
+                    let payload = unsafe { Box::from_raw(std::slice::from_raw_parts_mut(Box::into_raw(payload) as *mut u8, std::mem::size_of::<JpegApp13Payload>())) };
 
-                // remember that the whole app 13 segment payload is padded to be an even size
-                if jpeg_raw[offset] == 0 { offset += 1; }
-            } else {
-                let payload = if segment_payload_size > 0 {
-                    // NOTE Do NOT store the payload size in the payload bytes. We'll recalculate
-                    // it when repacking.
-                    Some(jpeg_raw[offset + 2 .. offset + segment_payload_size as usize].to_owned().into_boxed_slice())
-                } else {
-                    None
-                };
+                    let segment_type = JpegSegmentType::APP13;
+                    let index = unpacked.segments.len();
+                    unpacked.segments.push(JpegSegment {
+                        segment_type,
+                        payload: Some(payload),
+                        additional_data: None,
+                    });
+                    unpacked.segment_indices.entry(segment_type).and_modify(|v| v.push(index)).or_insert(vec![index]);
 
-                unpacked.segments.push(JpegSegment {
-                    segment_type,
-                    payload,
-                    additional_data: None,
-                });
+                    // remember that the whole app 13 segment payload is padded to be an even size
+                    if jpeg_raw[offset] == 0 { offset += 1; }
+                },
 
-                offset += segment_payload_size as usize;
-            }
+                _ => {
+                    let payload = if segment_payload_size > 0 {
+                        // NOTE Do NOT store the payload size in the payload bytes. We'll recalculate
+                        // it when repacking.
+                        Some(jpeg_raw[offset + 2 .. offset + segment_payload_size as usize].to_owned().into_boxed_slice())
+                    } else {
+                        None
+                    };
+
+                    unpacked.segments.push(JpegSegment {
+                        segment_type,
+                        payload,
+                        additional_data: None,
+                    });
+
+                    offset += segment_payload_size as usize;
+                },
+            };
 
             if offset >= jpeg_raw.len() { break; }
         }
