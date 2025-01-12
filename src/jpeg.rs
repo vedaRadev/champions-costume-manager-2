@@ -487,7 +487,10 @@ impl Jpeg {
                         jpeg_raw.read_exact(&mut header)?;
                         let mut header: PackedIptcDatasetHeader = unsafe { std::mem::transmute(header) };
                         // NOTE Remember that all data in a jpeg is stored big-endian...
-                        if cfg!(target_endian = "little") { header.data_size_bytes = header.data_size_bytes.swap_bytes(); }
+                        #[cfg(target_endian = "little")]
+                        {
+                            header.data_size_bytes = header.data_size_bytes.swap_bytes(); 
+                        }
                         let mut data = vec![0u8; header.data_size_bytes as usize];
                         jpeg_raw.read_exact(&mut data)?;
 
