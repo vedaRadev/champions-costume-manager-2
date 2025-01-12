@@ -261,7 +261,6 @@ fn main() {
         eprintln!("Failed to read costume jpeg: {err}");
         std::process::exit(1);
     });
-    // FIXME Jpeg unpacking should return a result, not just panic (see jpeg implementation)
     let costume_jpeg = Jpeg::unpack(jpeg_raw).expect("failed to unpack");
     let file_stem = app_args.costume_save_file_path
         .as_ref().unwrap()
