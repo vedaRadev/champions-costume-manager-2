@@ -168,6 +168,7 @@ struct AppArgs {
 
 static HELP_STRING: &str = r#"
 A tool for organizing and managing costume saves for Champions Online.
+
 CAUTION: This tool will effectively OVERWRITE costume saves, so be careful! If
 you want to view the results of potential changes before overwriting a file, use
 --dry-run in conjunction with --inspect. --dry-run does not need to be specified
@@ -393,7 +394,8 @@ fn main() {
             // Copy file creation time from old file to new file, not applicable on unix systems
             // TODO If something fails when trying to copy file creation time from the old file to
             // the new file, should we just continue instead of failing?
-            if cfg!(windows) {
+            #[cfg(windows)]
+            {
                 use std::os::windows::fs::FileTimesExt;
                 let old_file = std::fs::File::open(app_args.costume_save_file_path.as_ref().unwrap()).unwrap_or_else(|err| {
                     eprintln!("failed to open original file {:?} for reading: {err}", app_args.costume_save_file_path.as_ref().unwrap());
