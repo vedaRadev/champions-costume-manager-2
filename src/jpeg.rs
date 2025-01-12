@@ -77,7 +77,6 @@ pub enum JpegSegmentType {
 
 pub struct UnknownSegmentError { marker: u8 }
 
-// TODO maybe just impl From and return a JpegSegmentType::UNKNOWN on unrecognized marker?
 impl TryFrom<u8> for JpegSegmentType {
     type Error = UnknownSegmentError;
     fn try_from(marker: u8) -> Result<Self, Self::Error> {
@@ -152,7 +151,7 @@ pub trait SegmentPayload {}
 
 // https://metacpan.org/dist/Image-MetaData-JPEG/view/lib/Image/MetaData/JPEG/Structures.pod
 // http://www.iptc.org/std/IIM/4.2/specification/IIMV4.2.pdf (page 14)
-// NOTE We do NOT account for _extended_ IPTC data sets!
+// NOTE We do NOT account for _extended_ IPTC data sets (yet)!
 impl SegmentPayload for JpegApp13Payload {}
 pub struct JpegApp13Payload {
     /// Null-terminated identifier e.g. "Photoshop 3.0\0"
@@ -163,13 +162,6 @@ pub struct JpegApp13Payload {
     // Padded to be even ("\0\0" if no name)
     // TODO Maybe somehow enforce above whenever someone tries to change the resource name?
     pub resource_name: Box<[u8]>,
-    // NOTE: When writing the data sets, the data must be padded with an additional \0 to remain
-    // even!
-    //
-    // Technically the APP13 segment can contain multiple records but Champs only seems to use
-    // a single record: 2 - the application record.
-    // See notes for data set id meanings.
-    //
     // Key: u16, combination of u8 record # and u8 dataset #
     // Value: Vec of datasets initially in the order that they were seen during parsing.
     datasets: BTreeMap<u16, Vec<IptcDataset>>
@@ -489,7 +481,6 @@ impl Jpeg {
                         }
                         let mut data = vec![0u8; header.data_size_bytes as usize];
                         jpeg_raw.read_exact(&mut data)?;
-
                         let key = to_iptc_dataset_key(header.record_number, header.dataset_number);
                         let dataset = IptcDataset {
                             record_number: header.record_number,
@@ -568,7 +559,7 @@ impl Jpeg {
     pub fn get_segment(&self, segment_type: JpegSegmentType) -> Option<Vec<&JpegSegment>> {
         self.segment_indices
             .get(&segment_type)
-            .map(|indices|  indices.iter().map(|index| &self.segments[*index]).collect())
+            .map(|indices| indices.iter().map(|index| &self.segments[*index]).collect())
     }
 
     pub fn get_segment_mut(&mut self, segment_type: JpegSegmentType) -> Option<Vec<&mut JpegSegment>> {
