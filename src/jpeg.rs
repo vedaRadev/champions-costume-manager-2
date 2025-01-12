@@ -1,5 +1,3 @@
-// TODO Figure out how to construct Box<[u8]> directly instead of going through into_boxed_slice()
-
 // TODO get rid of the dependency on ByteOrder
 use byteorder::{ ByteOrder, BigEndian };
 use std::collections::{ HashMap, BTreeMap };
@@ -173,7 +171,7 @@ pub struct JpegApp13Payload {
     // See notes for data set id meanings.
     //
     // Key: u16, combination of u8 record # and u8 dataset #
-    // Value: Vec of datasets initially in the order that they were seen during unpacking.
+    // Value: Vec of datasets initially in the order that they were seen during parsing.
     datasets: BTreeMap<u16, Vec<IptcDataset>>
 }
 
@@ -212,8 +210,8 @@ impl JpegSegment {
         unsafe { &mut *(self.payload.as_mut().unwrap().as_ptr() as *mut T) }
     }
 
-    fn pack(&self) -> Box<[u8]> {
-        let mut packed_segment = vec![0xFF, self.segment_type as u8];
+    fn serialize(&self) -> Box<[u8]> {
+        let mut serialized_segment = vec![0xFF, self.segment_type as u8];
 
         match self.segment_type {
             // TODO There's probably a way to do this without allocating so much memory.
@@ -228,60 +226,60 @@ impl JpegSegment {
             JpegSegmentType::APP13 => {
                 let payload = self.get_payload_as::<JpegApp13Payload>();
 
-                let mut packed_datasets: Vec<u8> = Vec::new();
+                let mut serialized_datasets: Vec<u8> = Vec::new();
                 for (_, datasets) in payload.datasets.iter() {
                     for dataset in datasets {
                         // TODO maybe use PackedIptcDatasetHeader?
-                        packed_datasets.push(0x1C);
-                        packed_datasets.push(dataset.record_number);
-                        packed_datasets.push(dataset.dataset_number);
+                        serialized_datasets.push(0x1C);
+                        serialized_datasets.push(dataset.record_number);
+                        serialized_datasets.push(dataset.dataset_number);
                         // NOTE the length of the data set data does NOT include the bytes used to
                         // report the length.
-                        packed_datasets.extend((dataset.data.len() as u16).to_be_bytes());
-                        packed_datasets.extend(dataset.data.clone());
+                        serialized_datasets.extend((dataset.data.len() as u16).to_be_bytes());
+                        serialized_datasets.extend(dataset.data.clone());
                     }
                 }
-                if packed_datasets.len() % 2 == 1 { packed_datasets.push(0); }
+                if serialized_datasets.len() % 2 == 1 { serialized_datasets.push(0); }
 
-                let mut packed_payload: Vec<u8> = vec![];
-                packed_payload.extend(&payload.id);
-                packed_payload.extend((payload.resource_type).to_be_bytes());
-                packed_payload.extend((payload.resource_id).to_be_bytes());
+                let mut serialized_payload: Vec<u8> = vec![];
+                serialized_payload.extend(&payload.id);
+                serialized_payload.extend((payload.resource_type).to_be_bytes());
+                serialized_payload.extend((payload.resource_id).to_be_bytes());
                 // TODO See note on JpegApp13Payload resource_name field. If we _do_ end up
                 // providing a interface that must be used to get and set the resource name, then
                 // we don't need to enforce padding here.
                 if payload.resource_name.is_empty() {
-                    packed_payload.push(0);
-                    packed_payload.push(0);
+                    serialized_payload.push(0);
+                    serialized_payload.push(0);
                 } else {
-                    packed_payload.extend(payload.resource_name.clone());
-                    if payload.resource_name.len() % 2 == 1 { packed_payload.push(0); }
+                    serialized_payload.extend(payload.resource_name.clone());
+                    if payload.resource_name.len() % 2 == 1 { serialized_payload.push(0); }
                 }
-                packed_payload.extend((packed_datasets.len() as u32).to_be_bytes());
-                packed_payload.extend(packed_datasets);
+                serialized_payload.extend((serialized_datasets.len() as u32).to_be_bytes());
+                serialized_payload.extend(serialized_datasets);
 
-                packed_segment.extend(((packed_payload.len() + std::mem::size_of::<u16>()) as u16).to_be_bytes());
-                packed_segment.extend(packed_payload);
+                serialized_segment.extend(((serialized_payload.len() + std::mem::size_of::<u16>()) as u16).to_be_bytes());
+                serialized_segment.extend(serialized_payload);
             },
 
             _ => {
                 if let Some(payload) = &self.payload {
-                    packed_segment.extend(((payload.len() + std::mem::size_of::<u16>()) as u16).to_be_bytes());
-                    packed_segment.extend(payload);
+                    serialized_segment.extend(((payload.len() + std::mem::size_of::<u16>()) as u16).to_be_bytes());
+                    serialized_segment.extend(payload);
                 }
                 if let Some(additional_data) = &self.additional_data {
-                    packed_segment.extend(additional_data);
+                    serialized_segment.extend(additional_data);
                 }
             }
         }
 
-        packed_segment.into_boxed_slice()
+        serialized_segment.into_boxed_slice()
     }
 }
 
 #[derive(Debug)]
 #[allow(dead_code)]
-pub enum UnpackingError {
+pub enum ParseError {
     /// Segment markers are always preceded by an 0xFF byte but we encountered something else.
     InvalidSegmentMagic { magic: u8 },
     /// We don't recognize or support the segment marker we encountered.
@@ -290,11 +288,11 @@ pub enum UnpackingError {
     PayloadInterrupted { marker: u8, payload_size: u16, offset: usize },
     /// Something went wrong when attempting to parse segment-specific payload data.
     MalformedSegmentPayload { marker: u8, offset: usize },
-    /// An IO error occurred during decode.
+    /// An IO error occurred during parsing.
     IOError(std::io::Error)
 }
 
-impl From<std::io::Error> for UnpackingError {
+impl From<std::io::Error> for ParseError {
     fn from(error: std::io::Error) -> Self {
         Self::IOError(error)
     }
@@ -306,26 +304,25 @@ pub struct Jpeg {
     segments: Vec<JpegSegment>
 }
 
-// TODO change semantics from unpack/pack to parse/serialize
 // TODO Should we be returning a Box<dyn Error>?
 impl Jpeg {
-    pub fn unpack(jpeg_raw: Vec<u8>) -> Result<Self, UnpackingError>  {
+    pub fn parse(jpeg_raw: Vec<u8>) -> Result<Self, ParseError>  {
         use std::io::{prelude::*, BufRead, Cursor};
         let mut jpeg_raw = Cursor::new(jpeg_raw);
 
-        let mut unpacked = Self { segment_indices: HashMap::new(), segments: Vec::new() };
+        let mut parsed = Self { segment_indices: HashMap::new(), segments: Vec::new() };
         loop {
             let mut magic = [0u8];
             let bytes_read = jpeg_raw.read(&mut magic)?;
             if bytes_read == 0 { break; }
             let magic = magic[0];
-            if magic != 0xFF { return Err(UnpackingError::InvalidSegmentMagic { magic }); }
+            if magic != 0xFF { return Err(ParseError::InvalidSegmentMagic { magic }); }
 
             let mut marker = [0u8];
             let marker_position = jpeg_raw.position();
             jpeg_raw.read_exact(&mut marker)?;
             let marker = marker[0];
-            let segment_type = JpegSegmentType::try_from(marker).map_err(|err| UnpackingError::UnrecognizedSegmentMarker { marker: err.marker, offset: marker_position as usize })?;
+            let segment_type = JpegSegmentType::try_from(marker).map_err(|err| ParseError::UnrecognizedSegmentMarker { marker: err.marker, offset: marker_position as usize })?;
 
             // NOTE: The size of the payload _includes_ the 2 bytes used for reporting the payload size
             let segment_payload_size: u16 = match segment_type {
@@ -383,7 +380,7 @@ impl Jpeg {
                 // FIXME if we switch to buffered reading
                 let offset = jpeg_raw.position() as usize;
                 if segment_payload_size > 0 && offset + segment_payload_size as usize >= jpeg_raw.get_ref().len() {
-                    return Err(UnpackingError::PayloadInterrupted {
+                    return Err(ParseError::PayloadInterrupted {
                         marker,
                         payload_size: segment_payload_size,
                         offset,
@@ -408,7 +405,7 @@ impl Jpeg {
                     loop {
                         let bytes_read = jpeg_raw.read_until(0xFF, &mut image_data)?;
                         if bytes_read == 0 {
-                            return Err(UnpackingError::IOError(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)));
+                            return Err(ParseError::IOError(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)));
                         }
 
                         let mut marker = [0u8];
@@ -427,13 +424,13 @@ impl Jpeg {
                     jpeg_raw.seek_relative(-2)?;
 
                     let segment_type = JpegSegmentType::SOS;
-                    let index = unpacked.segments.len();
-                    unpacked.segments.push(JpegSegment {
+                    let index = parsed.segments.len();
+                    parsed.segments.push(JpegSegment {
                         segment_type,
                         payload: Some(payload),
                         additional_data: Some(image_data.into_boxed_slice())
                     });
-                    unpacked.segment_indices.entry(segment_type).and_modify(|v| v.push(index)).or_insert(vec![index]);
+                    parsed.segment_indices.entry(segment_type).and_modify(|v| v.push(index)).or_insert(vec![index]);
                 },
 
                 // Because some fields in the APP13 header are variable length we need to make sure
@@ -458,7 +455,7 @@ impl Jpeg {
                     let mut resource_name: Vec<u8> = Vec::new();
                     let bytes_read = jpeg_raw.read_until(0, &mut resource_name)?;
                     if bytes_read == 0 {
-                        return Err(UnpackingError::IOError(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)));
+                        return Err(ParseError::IOError(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)));
                     }
 
                     // resource name should be padded with a null byte to be an even length
@@ -467,7 +464,7 @@ impl Jpeg {
                         jpeg_raw.read_exact(&mut padded_null_byte)?;
                         let padded_null_byte = padded_null_byte[0];
                         if padded_null_byte != 0 {
-                            return Err(UnpackingError::MalformedSegmentPayload { marker, offset: jpeg_raw.position() as usize - 1 });
+                            return Err(ParseError::MalformedSegmentPayload { marker, offset: jpeg_raw.position() as usize - 1 });
                         }
                         resource_name.push(padded_null_byte);
                     }
@@ -519,13 +516,13 @@ impl Jpeg {
                     let payload = unsafe { Box::from_raw(std::slice::from_raw_parts_mut(Box::into_raw(payload) as *mut u8, std::mem::size_of::<JpegApp13Payload>())) };
 
                     let segment_type = JpegSegmentType::APP13;
-                    let index = unpacked.segments.len();
-                    unpacked.segments.push(JpegSegment {
+                    let index = parsed.segments.len();
+                    parsed.segments.push(JpegSegment {
                         segment_type,
                         payload: Some(payload),
                         additional_data: None,
                     });
-                    unpacked.segment_indices.entry(segment_type).and_modify(|v| v.push(index)).or_insert(vec![index]);
+                    parsed.segment_indices.entry(segment_type).and_modify(|v| v.push(index)).or_insert(vec![index]);
 
                     // remember that the whole app 13 segment payload is padded to be an even size
                     // NOTE I think this may only work so long as the underlying buffer contains
@@ -545,7 +542,7 @@ impl Jpeg {
                         None
                     };
 
-                    unpacked.segments.push(JpegSegment {
+                    parsed.segments.push(JpegSegment {
                         segment_type,
                         payload,
                         additional_data: None,
@@ -556,14 +553,14 @@ impl Jpeg {
 
         // TODO additional jpeg validation here
 
-        Ok(unpacked)
+        Ok(parsed)
     }
 
-    pub fn pack(&self) -> Box<[u8]> {
+    pub fn serialize(&self) -> Box<[u8]> {
         let mut encoded = vec![];
         for segment in self.segments.iter() {
-            let packed_segment = segment.pack();
-            encoded.extend(packed_segment);
+            let serialized_segment = segment.serialize();
+            encoded.extend(serialized_segment);
         }
 
         encoded.into_boxed_slice()

@@ -1,11 +1,11 @@
 // NOTE I'm not sure if I like how the structure of the jpeg/costume stuff is turning out. From a
-// pure workflow standpoint, the whole point is to decode (unpack) a jpeg, hold it in memory,
-// update some of the app13 metadata, then save (repack) it to disk by overwriting the previous
-// file. HOWEVER we also will also have to display the jpeg image itself in the gui, so do we hold
-// a raw copy of the jpeg AND the decoded jpeg in memory at the same time (I think this is
-// essentially what would happen if we decode the jpeg ourselves AND use a 3rd party lib to display
-// the image from the file [e.g. egui image widget] -- though the 3rd party lib might just decode
-// the image then send it to the GPU, idk what I'm talking about here).
+// pure workflow standpoint, the whole point is to parse a jpeg, hold it in memory, update some of
+// the app13 metadata, then serialize it to disk by overwriting the previous file. HOWEVER we also
+// will also have to display the jpeg image itself in the gui, so do we hold a raw copy of the jpeg
+// AND the decoded jpeg in memory at the same time (I think this is essentially what would happen
+// if we decode the jpeg ourselves AND use a 3rd party lib to display the image from the file [e.g.
+// egui image widget] -- though the 3rd party lib might just decode the image then send it to the
+// GPU, idk what I'm talking about here).
 
 mod jpeg;
 
@@ -34,7 +34,7 @@ struct CostumeSaveFile {
 }
 
 #[allow(dead_code)]
-// TODO constructor that returns a result, maybe just take the file path and unpack from that.
+// TODO constructor that returns a result, maybe just take the file path and parse from that.
 //
 // TODO save file validation
 // check app13 for the following (do testing and see if the game cares about any of this):
@@ -261,7 +261,7 @@ fn main() {
         eprintln!("Failed to read costume jpeg: {err}");
         std::process::exit(1);
     });
-    let costume_jpeg = Jpeg::unpack(jpeg_raw).expect("failed to unpack");
+    let costume_jpeg = Jpeg::parse(jpeg_raw).expect("failed to parse jpeg");
     let file_stem = app_args.costume_save_file_path
         .as_ref().unwrap()
         .file_stem().unwrap()
@@ -328,12 +328,12 @@ fn main() {
     if !app_args.dry_run && dirty {
         println!();
         use std::io::prelude::*;
-        let packed_data = costume_save.jpeg.pack();
+        let serialized = costume_save.jpeg.serialize();
         let mut file = std::fs::File::create(&full_path).unwrap_or_else(|err| {
             eprintln!("Failed to open {:?} for writing: {err}", full_path);
             std::process::exit(1);
         });
-        if let Err(err) = file.write_all(&packed_data) {
+        if let Err(err) = file.write_all(&serialized) {
             eprintln!("failed to write to file {:?}: {err}", full_path);
             std::process::exit(1);
         } else {
