@@ -37,7 +37,10 @@ struct CostumeSaveFile {
 // TODO constructor that returns a result, maybe just take the file path and parse from that.
 //
 // TODO save file validation
+// check the filename itself for:
+// - "Costume_" prefix
 // check app13 for the following (do testing and see if the game cares about any of this):
+// - segment itself exists
 // - identifier is "Photoshop 3.0\0"
 // - resource type is "8BIM" (as a u32)
 // - resource id is 0x0404
@@ -148,7 +151,7 @@ struct AppArgs {
     new_account_name: Option<String>,
     /// New character name to set in costume jpeg metadata.
     new_character_name: Option<String>,
-    /// New save name to set excluding the "Costume_" prefix and j2000 timestamp postfix.
+    /// New save name to set excluding the "Costume_" prefix and j2000 timestamp suffix.
     new_save_name: Option<String>,
     /// Whether or not to strip the J2000 timestamp from the end of the filename.
     should_strip_timestamp: bool,
@@ -163,13 +166,62 @@ struct AppArgs {
     dry_run: bool,
 }
 
+static HELP_STRING: &str = r#"
+A tool for organizing and managing costume saves for Champions Online.
+CAUTION: This tool will effectively OVERWRITE costume saves, so be careful! If
+you want to view the results of potential changes before overwriting a file, use
+--dry-run in conjunction with --inspect. --dry-run does not need to be specified
+if no mutative options are used.
+
+This tool is early in development, so back up your saves and use at your own risk!
+
+Usage: ccm.exe <costume save file path> [options]
+
+-h, --help
+    Show this usage information.
+
+-c, --set-character-name <character_name>
+    Set the character name that will be displayed in-game.
+
+-a, --set-account-name <account_name>
+    Set the account name that will be displayed in-game.
+
+-s, --set-save-name <save_name>
+    Set the portion of the filename between the "Costume_" prefix and the j2000
+    timestamp suffix (if it exists).
+
+-t, --strip-timestamp
+    Strips the j2000 timestamp suffix from the save file name, removing the date
+    display from its entry in the in-game save menu. If there is no j2000
+    timestamp or if the timestamp is invalid, this is effectively a no-op.
+    NOTE: If you want to re-add an in-game date display, you will need to
+    calculate your own j2000 timestamp and append it to the end of the file name
+    yourself in the form "_<timestamp>".
+
+-i, --inspect [short|long]
+    Print file name, in-game save display, and costume metadata. Defaults to
+    short if no specification is supplied. Long will print the costume hash and
+    proprietary costume specification as well as all the information that short
+    displays.
+    If this option is supplied in conjunction with mutative options such as
+    --set-character-name or --strip-timestamp, the mutative options are applied
+    first then the updated information is inspected and displayed.
+
+--dry-run
+    Applies mutative options to the in-memory costume save but does not write
+    the results to disk. Use in conjunction with --inspect to see the results of
+    potential changes. This option does not need to be specified if no mutative
+    options are used.
+"#;
+
 fn main() {
     let mut raw_args = std::env::args().skip(1).peekable();
     let mut app_args: AppArgs = AppArgs::default();
     while let Some(arg) = raw_args.next() {
         match arg.as_str() {
             "--help" | "-h" => {
-                todo!();
+                println!("{HELP_STRING}");
+                std::process::exit(0);
             },
 
             // TODO Should we allow for setting account names to empty strings?
@@ -188,9 +240,6 @@ fn main() {
                 });
             },
 
-            // TODO Maybe there's a better name to use here since we're not setting the FULL file
-            // name, just the part between "Costume_" and the timestamp (if there is one). Maybe
-            // documenting in the help string is enough.
             "--set-save-name" | "-s" => {
                 app_args.new_save_name = raw_args.next().or_else(|| {
                     eprintln!("Unexpected end of input stream, expected file name");
