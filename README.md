@@ -4,6 +4,8 @@ An offline tool for managing in-game displays of costume save files in Champions
 Online. This will initially be a command-line tool but the plan is to eventually
 have a functional GUI serve as the primary form of user interaction.
 
+![demo gif](./images/demo.gif)
+
 Note that since Champions Online primarily targets Windows that is also
 currently the primary target of this application. At the moment the command-line
 tool _should_ work on Linux, though it is untested and some features may be
