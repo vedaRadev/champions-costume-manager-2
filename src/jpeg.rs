@@ -398,7 +398,7 @@ impl Jpeg {
                 JPEG_MARKER_SOS => {
                     let mut payload = vec![0u8; segment_payload_size as usize];
                     // SAFETY: We've already determined that there are enough bytes left to read the entire payload.
-                    jpeg_raw.read_exact(&mut payload).unwrap();
+                    jpeg_raw.read_exact(&mut payload)?;
                     let payload = payload.into_boxed_slice();
 
                     // The marker magic number (0xFF) may be encountered within the image scan,
@@ -406,8 +406,7 @@ impl Jpeg {
                     // of the next segment, denoted by the same magic 0xFF.
                     let mut image_data: Vec<u8> = Vec::new();
                     loop {
-                        // TODO handle potential IO error instead of unwrapping
-                        let bytes_read = jpeg_raw.read_until(0xFF, &mut image_data).unwrap();
+                        let bytes_read = jpeg_raw.read_until(0xFF, &mut image_data)?;
                         if bytes_read == 0 {
                             return Err(UnpackingError::IOError(std::io::Error::from(std::io::ErrorKind::UnexpectedEof)));
                         }
@@ -425,7 +424,7 @@ impl Jpeg {
                     // 0xFF off the image data and back our cursor up a bit to prime for the next
                     // loop of the jpeg parser.
                     image_data.pop();
-                    jpeg_raw.seek_relative(-2).unwrap();
+                    jpeg_raw.seek_relative(-2)?;
 
                     let segment_type = JpegSegmentType::SOS;
                     let index = unpacked.segments.len();
@@ -526,6 +525,9 @@ impl Jpeg {
                     unpacked.segment_indices.entry(segment_type).and_modify(|v| v.push(index)).or_insert(vec![index]);
 
                     // remember that the whole app 13 segment payload is padded to be an even size
+                    // NOTE I think this may only work so long as the underlying buffer contains
+                    // all the bytes of the raw jpeg. If it's buffered then this may not work properly?
+                    // Just something to keep an eye out for in the future.
                     if jpeg_raw.get_ref()[jpeg_raw.position() as usize] == 0 {
                         jpeg_raw.seek_relative(1)?;
                     }
