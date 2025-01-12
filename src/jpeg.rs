@@ -304,7 +304,6 @@ pub struct Jpeg {
     segments: Vec<JpegSegment>
 }
 
-// TODO Should we be returning a Box<dyn Error>?
 impl Jpeg {
     pub fn parse(jpeg_raw: Vec<u8>) -> Result<Self, ParseError>  {
         use std::io::{prelude::*, BufRead, Cursor};
