@@ -36,16 +36,39 @@ struct CostumeSaveFile {
 #[allow(dead_code)]
 // TODO constructor that returns a result, maybe just take the file path and parse from that.
 //
-// TODO save file validation
-// check the filename itself for:
-// - "Costume_" prefix
-// check app13 for the following (do testing and see if the game cares about any of this):
-// - segment itself exists
-// - identifier is "Photoshop 3.0\0"
-// - resource type is "8BIM" (as a u32)
-// - resource id is 0x0404
-// - resource name is "\0\0" 
 impl CostumeSaveFile {
+    // TODO Don't return Box<dyn Error>, return something more specific
+    // TODO save file validation
+    // check the filename itself for:
+    // - "Costume_" prefix
+    // check app13 for the following (do testing and see if the game cares about any of this):
+    // - segment itself exists
+    // - identifier is "Photoshop 3.0\0"
+    // - resource type is "8BIM" (as a u32)
+    // - resource id is 0x0404
+    // - resource name is "\0\0" 
+    fn new_from_path(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let jpeg_raw = std::fs::read(path)?;
+        let costume_jpeg = Jpeg::parse(jpeg_raw)?;
+        let file_stem = path
+            .file_stem().unwrap()
+            .to_str().unwrap();
+        let j2000_timestamp = file_stem
+            .split('_')
+            .last().unwrap()
+            .parse::<i64>().ok();
+        let save_name = {
+            let save_name_start = file_stem.find("_").unwrap() + 1;
+            let save_name_end = if j2000_timestamp.is_some() { file_stem.rfind("_").unwrap() } else { file_stem.len() };
+            file_stem[save_name_start .. save_name_end].to_owned()
+        };
+        Ok(CostumeSaveFile {
+            jpeg: costume_jpeg,
+            save_name,
+            j2000_timestamp,
+        })
+    }
+
     fn get_app13_payload(&self) -> &JpegApp13Payload {
         let app13_segment = self.jpeg.get_segment(JpegSegmentType::APP13).unwrap()[0];
         let app13_payload = app13_segment.get_payload_as::<JpegApp13Payload>();
@@ -307,29 +330,10 @@ fn main() {
     }
 
     // SAFETY: costume_save_file_path has been determined to be a Some value at this point
-    let jpeg_raw = std::fs::read(app_args.costume_save_file_path.as_ref().unwrap()).unwrap_or_else(|err| {
-        eprintln!("Failed to read costume jpeg: {err}");
+    let mut costume_save = CostumeSaveFile::new_from_path(app_args.costume_save_file_path.as_ref().unwrap()).unwrap_or_else(|err| {
+        eprintln!("Failed to create costume save: {err}");
         std::process::exit(1);
     });
-    let costume_jpeg = Jpeg::parse(jpeg_raw).expect("failed to parse jpeg");
-    let file_stem = app_args.costume_save_file_path
-        .as_ref().unwrap()
-        .file_stem().unwrap()
-        .to_str().unwrap();
-    let j2000_timestamp = file_stem
-        .split('_')
-        .last().unwrap()
-        .parse::<i64>().ok();
-    let save_name = {
-        let save_name_start = file_stem.find("_").unwrap() + 1;
-        let save_name_end = if j2000_timestamp.is_some() { file_stem.rfind("_").unwrap() } else { file_stem.len() };
-        file_stem[save_name_start .. save_name_end].to_owned()
-    };
-    let mut costume_save = CostumeSaveFile {
-        jpeg: costume_jpeg,
-        save_name,
-        j2000_timestamp,
-    };
 
     let mut dirty = false;
     if let Some(new_account_name) = app_args.new_account_name {

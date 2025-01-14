@@ -284,6 +284,36 @@ pub enum ParseError {
     IOError(std::io::Error)
 }
 
+impl std::error::Error for ParseError {}
+
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::InvalidSegmentMagic { magic } => write!(
+                f,
+                "Invalid segment magic, expected 0xFF but got {magic:#02X}"
+            ),
+
+            Self::UnrecognizedSegmentMarker { marker, offset } => write!(
+                f,
+                "Unrecognized marker at byte {offset}: {marker:#02X}"
+            ),
+
+            Self::PayloadInterrupted { marker, payload_size, offset } => write!(
+                f,
+                "Not enough bytes left to read {marker:#02X} payload of size {payload_size} at byte {offset}"
+            ),
+
+            Self::MalformedSegmentPayload { marker, offset } => write!(
+                f,
+                "Malformed {marker:#02X} payload at byte {offset}"
+            ),
+
+            Self::IOError(io_err) => write!(f, "{io_err}"),
+        }
+    }
+}
+
 impl From<std::io::Error> for ParseError {
     fn from(error: std::io::Error) -> Self {
         Self::IOError(error)
