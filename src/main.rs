@@ -1,12 +1,3 @@
-// NOTE I'm not sure if I like how the structure of the jpeg/costume stuff is turning out. From a
-// pure workflow standpoint, the whole point is to parse a jpeg, hold it in memory, update some of
-// the app13 metadata, then serialize it to disk by overwriting the previous file. HOWEVER we also
-// will also have to display the jpeg image itself in the gui, so do we hold a raw copy of the jpeg
-// AND the decoded jpeg in memory at the same time (I think this is essentially what would happen
-// if we decode the jpeg ourselves AND use a 3rd party lib to display the image from the file [e.g.
-// egui image widget] -- though the 3rd party lib might just decode the image then send it to the
-// GPU, idk what I'm talking about here).
-
 mod jpeg;
 
 use jpeg::{
@@ -25,6 +16,9 @@ const ACCOUNT_NAME_INDEX: usize = 0;
 const CHARACTER_NAME_INDEX: usize = 1;
 const COSTUME_HASH_INDEX: usize = 2;
 
+// TODO list:
+// * Caching of in-game display names, only recalc when changed to improve GUI perf.
+// * Maybe caching of file name as well (currently requires dynamic creation of string)?
 struct CostumeSaveFile {
     jpeg: Jpeg,
     /// The name of the save file as it appears between the "Costume_" prefix and j2000 timestamp
@@ -35,7 +29,6 @@ struct CostumeSaveFile {
 
 #[allow(dead_code)]
 // TODO constructor that returns a result, maybe just take the file path and parse from that.
-//
 impl CostumeSaveFile {
     // TODO Don't return Box<dyn Error>, return something more specific
     // TODO save file validation
@@ -238,8 +231,8 @@ Usage: ccm.exe <costume save file path> [options]
     options are used.
 "#;
 
-fn main() {
-    let mut raw_args = std::env::args().skip(1).peekable();
+fn run_command_line_util(raw_args: std::env::Args) {
+    let mut raw_args = raw_args.skip(1).peekable();
     let mut app_args: AppArgs = AppArgs::default();
     while let Some(arg) = raw_args.next() {
         match arg.as_str() {
@@ -434,4 +427,49 @@ fn main() {
             }
         }
     }
+}
+
+fn main() {
+    let args = std::env::args();
+    if args.len() > 1 {
+        run_command_line_util(args);
+        return;
+    }
+
+    let costume_dir = std::env::var("COSTUMES_DIR").expect("COSTUMES_DIR env var not set");
+    std::env::set_current_dir(&costume_dir).expect("failed to set current directory to COSTUME_DIR");
+    let saves = std::fs::read_dir(&costume_dir)
+        .unwrap()
+        .flatten()
+        .flat_map(|entry| CostumeSaveFile::new_from_path(entry.path().as_path()))
+        .collect::<Vec<CostumeSaveFile>>();
+
+    use eframe::egui;
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 720.0]),
+        ..Default::default()
+    };
+
+    #[derive(PartialEq)]
+    enum DisplayType { DisplayName, FileName }
+    let mut display_type = DisplayType::DisplayName;
+
+    // NOTE If we want to write app state to disk we need to enable the "persistence" feature for
+    // eframe and use eframe::run_native() instead of eframe::run_simple_native().
+    // https://docs.rs/eframe/latest/eframe/
+    _ = eframe::run_simple_native("Champions Costume Manager", options, move |ctx, _| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.selectable_value(&mut display_type, DisplayType::DisplayName, "Display Name");
+            ui.selectable_value(&mut display_type, DisplayType::FileName, "File Name");
+
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for save in saves.iter() {
+                    ui.label(match display_type {
+                        DisplayType::DisplayName => save.get_in_game_display_name(),
+                        DisplayType::FileName => save.get_file_name(),
+                    });
+                }
+            });
+        });
+    });
 }
