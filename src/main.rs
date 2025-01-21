@@ -438,11 +438,17 @@ fn main() {
 
     let costume_dir = std::env::var("COSTUMES_DIR").expect("COSTUMES_DIR env var not set");
     std::env::set_current_dir(&costume_dir).expect("failed to set current directory to COSTUME_DIR");
-    let saves = std::fs::read_dir(&costume_dir)
-        .unwrap()
-        .flatten()
-        .flat_map(|entry| CostumeSaveFile::new_from_path(entry.path().as_path()))
-        .collect::<Vec<CostumeSaveFile>>();
+    use std::collections::HashMap;
+    let mut saves: HashMap<std::ffi::OsString, CostumeSaveFile> = HashMap::new();
+    for entry in std::fs::read_dir(&costume_dir).unwrap().flatten() {
+        let path = entry.path();
+        if let Ok(costume_save) = CostumeSaveFile::new_from_path(path.as_path()) {
+            saves.insert(path.into_os_string(), costume_save);
+        }
+    }
+
+    // TODO sorting based on selected display type
+    let ui_save_display: Vec<std::ffi::OsString> = saves.keys().cloned().collect();
 
     use eframe::egui;
     let options = eframe::NativeOptions {
@@ -454,20 +460,41 @@ fn main() {
     enum DisplayType { DisplayName, FileName }
     let mut display_type = DisplayType::DisplayName;
 
+    let mut selected_display: Option<std::ffi::OsString> = None;
+
     // NOTE If we want to write app state to disk we need to enable the "persistence" feature for
     // eframe and use eframe::run_native() instead of eframe::run_simple_native().
     // https://docs.rs/eframe/latest/eframe/
     _ = eframe::run_simple_native("Champions Costume Manager", options, move |ctx, _| {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.selectable_value(&mut display_type, DisplayType::DisplayName, "Display Name");
-            ui.selectable_value(&mut display_type, DisplayType::FileName, "File Name");
+        egui::SidePanel::right("details_display").show(ctx, |ui| {
+            match selected_display.as_ref() {
+                Some(save_id) => {
+                    let save = saves.get(save_id).unwrap();
+                    ui.label(&save.save_name);
+                },
 
+                None => {
+                    ui.label("Select a save to view details");
+                }
+            }
+        });
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                ui.selectable_value(&mut display_type, DisplayType::DisplayName, "Display Name");
+                ui.selectable_value(&mut display_type, DisplayType::FileName, "File Name");
+            });
+            ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
-                for save in saves.iter() {
-                    ui.label(match display_type {
-                        DisplayType::DisplayName => save.get_in_game_display_name(),
-                        DisplayType::FileName => save.get_file_name(),
-                    });
+                for save_id in ui_save_display.iter() {
+                    let save = saves.get(save_id).unwrap();
+                    ui.selectable_value(
+                        &mut selected_display,
+                        Some(save_id.clone()),
+                        match display_type {
+                            DisplayType::DisplayName => save.get_in_game_display_name(),
+                            DisplayType::FileName => save.get_file_name(),
+                        }
+                    );
                 }
             });
         });
