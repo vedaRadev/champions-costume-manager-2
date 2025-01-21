@@ -34,6 +34,7 @@ impl CostumeSaveFile {
     // TODO save file validation
     // check the filename itself for:
     // - "Costume_" prefix
+    // - ".jpg" suffix?
     // check app13 for the following (do testing and see if the game cares about any of this):
     // - segment itself exists
     // - identifier is "Photoshop 3.0\0"
@@ -462,15 +463,19 @@ fn main() {
 
     let mut selected_display: Option<std::ffi::OsString> = None;
 
+    // TODO once in-house jpeg image decoding (SOS) is implemented we can probably get rid of the
+    // image and maybe a few of the egui_extras dependencies
+
     // NOTE If we want to write app state to disk we need to enable the "persistence" feature for
     // eframe and use eframe::run_native() instead of eframe::run_simple_native().
     // https://docs.rs/eframe/latest/eframe/
     _ = eframe::run_simple_native("Champions Costume Manager", options, move |ctx, _| {
         egui::SidePanel::right("details_display").show(ctx, |ui| {
+            egui_extras::install_image_loaders(ctx);
             match selected_display.as_ref() {
                 Some(save_id) => {
-                    let save = saves.get(save_id).unwrap();
-                    ui.label(&save.save_name);
+                    let file = format!("file://{}", saves[save_id].get_file_name());
+                    ui.add(egui::Image::new(file.as_str()));
                 },
                 None => {
                     ui.label("Select a save to view details");

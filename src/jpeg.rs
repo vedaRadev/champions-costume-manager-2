@@ -1,4 +1,5 @@
 // TODO get rid of the dependency on ByteOrder
+// TODO proper image decode of SOS segment
 use byteorder::{ ByteOrder, BigEndian };
 use std::collections::{ HashMap, BTreeMap };
 
