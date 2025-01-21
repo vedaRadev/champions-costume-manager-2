@@ -447,18 +447,18 @@ fn main() {
         }
     }
 
-    // TODO sorting based on selected display type
-    let ui_save_display: Vec<std::ffi::OsString> = saves.keys().cloned().collect();
+    #[derive(PartialEq)]
+    enum DisplayType { DisplayName, FileName }
+    let mut display_type = DisplayType::DisplayName;
+
+    let mut ui_save_display: Vec<std::ffi::OsString> = saves.keys().cloned().collect();
+    ui_save_display.sort();
 
     use eframe::egui;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 720.0]),
         ..Default::default()
     };
-
-    #[derive(PartialEq)]
-    enum DisplayType { DisplayName, FileName }
-    let mut display_type = DisplayType::DisplayName;
 
     let mut selected_display: Option<std::ffi::OsString> = None;
 
@@ -472,7 +472,6 @@ fn main() {
                     let save = saves.get(save_id).unwrap();
                     ui.label(&save.save_name);
                 },
-
                 None => {
                     ui.label("Select a save to view details");
                 }
@@ -480,8 +479,12 @@ fn main() {
         });
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
-                ui.selectable_value(&mut display_type, DisplayType::DisplayName, "Display Name");
-                ui.selectable_value(&mut display_type, DisplayType::FileName, "File Name");
+                if ui.selectable_value(&mut display_type, DisplayType::DisplayName, "Display Name").clicked() {
+                    ui_save_display.sort_by_key(|k| saves[k].get_in_game_display_name());
+                }
+                if ui.selectable_value(&mut display_type, DisplayType::FileName, "File Name").clicked() {
+                    ui_save_display.sort();
+                }
             });
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
