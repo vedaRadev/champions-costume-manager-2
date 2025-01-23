@@ -462,6 +462,9 @@ fn main() {
     };
 
     let mut selected_display: Option<std::ffi::OsString> = None;
+    let mut save_name_edit = String::from("");
+    let mut account_name_edit = String::from("");
+    let mut character_name_edit = String::from("");
 
     // TODO once in-house jpeg image decoding (SOS) is implemented we can probably get rid of the
     // image and maybe a few of the egui_extras dependencies
@@ -471,15 +474,39 @@ fn main() {
     // https://docs.rs/eframe/latest/eframe/
     _ = eframe::run_simple_native("Champions Costume Manager", options, move |ctx, _| {
         egui::SidePanel::right("details_display").show(ctx, |ui| {
-            egui_extras::install_image_loaders(ctx);
-            match selected_display.as_ref() {
-                Some(save_id) => {
-                    let file = format!("file://{}", saves[save_id].get_file_name());
-                    ui.add(egui::Image::new(file.as_str()));
-                },
-                None => {
-                    ui.label("Select a save to view details");
+            if let Some(save_id) = selected_display.as_ref() {
+                // TODO display in-game save display and costume save name in text boxes, allow
+                // user to edit.
+                // TODO Advanced mode where you can view the jpeg metadata itself and choose
+                // whether to modify account name, character name, or both?
+                egui_extras::install_image_loaders(ctx);
+                let save = &saves[save_id];
+                let file = format!("file://{}", save.get_file_name());
+                ui.add(egui::Image::new(file.as_str()));
+                ui.label(format!("Save name: {}", save.save_name));
+                if let Some(timestamp) = save.j2000_timestamp {
+                    ui.label(format!("Timestamp: {timestamp}"));
+                } else {
+                    ui.label("Timestamp: None");
                 }
+                ui.label(format!("In-game Display: {}", save.get_in_game_display_name()));
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                    ui.label("Save Name:");
+                    ui.text_edit_singleline(&mut save_name_edit);
+                });
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                    ui.label("Account Name:");
+                    ui.text_edit_singleline(&mut account_name_edit);
+                });
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                    ui.label("Character Name:");
+                    ui.text_edit_singleline(&mut character_name_edit);
+                });
+                if ui.button("Save").clicked() {
+                    println!("TODO saving");
+                }
+            } else {
+                ui.label("Select a save to view details");
             }
         });
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -495,14 +522,18 @@ fn main() {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for save_id in ui_save_display.iter() {
                     let save = saves.get(save_id).unwrap();
-                    ui.selectable_value(
+                    if ui.selectable_value(
                         &mut selected_display,
                         Some(save_id.clone()),
                         match display_type {
                             DisplayType::DisplayName => save.get_in_game_display_name(),
                             DisplayType::FileName => save.get_file_name(),
                         }
-                    );
+                    ).clicked() {
+                        save_name_edit = save.save_name.clone();
+                        account_name_edit = save.get_account_name().to_owned();
+                        character_name_edit = save.get_character_name().to_owned();
+                    }
                 }
             });
         });
