@@ -183,10 +183,18 @@ fn main() {
         ..Default::default()
     };
 
-    let mut selected_display: Option<std::ffi::OsString> = None;
-    let mut save_name_edit = String::from("");
-    let mut account_name_edit = String::from("");
-    let mut character_name_edit = String::from("");
+    #[derive(Default)]
+    struct CostumeEdit {
+        strip_timestamp: bool,
+        timestamp: Option<i64>,
+        save_name: String,
+        account_name: String,
+        character_name: String,
+    }
+
+    // TODO maybe tie the selected costume and costume edit together so they can never get out of sync?
+    let mut costume_edit: Option<CostumeEdit> = None;
+    let mut selected_costume: Option<std::ffi::OsString> = None;
 
     // TODO once in-house jpeg image decoding (SOS) is implemented we can probably get rid of the
     // image and maybe a few of the egui_extras dependencies
@@ -195,42 +203,90 @@ fn main() {
     // eframe and use eframe::run_native() instead of eframe::run_simple_native().
     // https://docs.rs/eframe/latest/eframe/
     _ = eframe::run_simple_native("Champions Costume Manager", options, move |ctx, _| {
+
         egui::SidePanel::right("details_display").show(ctx, |ui| {
-            if let Some(save_id) = selected_display.as_ref() {
-                // TODO display in-game save display and costume save name in text boxes, allow
-                // user to edit.
-                // TODO Advanced mode where you can view the jpeg metadata itself and choose
-                // whether to modify account name, character name, or both?
+            // NOTE: For now we're just assuming that the selected costume and the costume edit
+            // data are properly tied together. Maybe we should tie these together better so that
+            // they can't possibly get out of sync.
+            if let Some(costume_file_name) = selected_costume.as_ref() {
+                let costume = &saves[costume_file_name];
+                let costume_edit = costume_edit.as_mut().unwrap();
+
                 egui_extras::install_image_loaders(ctx);
-                let save = &saves[save_id];
-                let file = format!("file://{}", save.get_file_name());
-                ui.add(egui::Image::new(file.as_str()));
-                ui.label(format!("Save name: {}", save.save_name));
-                if let Some(timestamp) = save.j2000_timestamp {
-                    ui.label(format!("Timestamp: {timestamp}"));
-                } else {
-                    ui.label("Timestamp: None");
-                }
-                ui.label(format!("In-game Display: {}", save.get_in_game_display_name()));
+                let file = format!("file://{}", costume_file_name.to_str().unwrap());
+                let image = egui::Image::new(file.as_str())
+                    .maintain_aspect_ratio(true)
+                    .max_height(500.0);
+                ui.add(image);
+
+                // FIXME we probably do not want to construct the file name every frame. Maybe
+                // cache it in the CostumeEdit struct itself?
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                    ui.label("File Name:");
+                    // NOTE stolen from the CostumeSaveFile impl
+                    // TODO maybe make a trait that has the get_file_name and
+                    // get_in_game_display_name functions? Then stick it on the CostumeSaveFile and
+                    // the CostumeEdit structs?
+                    let file_name = if let Some(j2000_timestamp) = costume_edit.timestamp {
+                        format!("Costume_{}_{}.jpg", costume_edit.save_name, j2000_timestamp)
+                    } else {
+                        format!("Costume_{}.jpg", costume_edit.save_name)
+                    };
+                    ui.label(file_name);
+                });
+                // FIXME again, don't want to construct this every frame
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                    ui.label("In-Game Display:");
+
+                    // NOTE also stolen from CostumeSaveFile impl
+                    let account_name = &costume_edit.account_name;
+                    let character_name = &costume_edit.character_name;
+                    let maybe_datetime_string = costume_edit.timestamp.and_then(|j2000_timestamp| {
+                        const JAN_1_2000_UNIX_TIME: i64 = 946684800;
+                        let unix_timestamp = JAN_1_2000_UNIX_TIME + j2000_timestamp;
+                        chrono::DateTime::from_timestamp(unix_timestamp, 0)
+                            .map(|utc_datetime| utc_datetime.format("%Y-%m-%d %H:%M:%S").to_string())
+                    });
+
+                    let value = if let Some(datetime_string) = maybe_datetime_string {
+                        format!("{}{} {}", account_name, character_name, datetime_string)
+                    } else {
+                        format!("{}{}", account_name, character_name)
+                    };
+
+                    ui.label(value);
+                });
+
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                     ui.label("Save Name:");
-                    ui.text_edit_singleline(&mut save_name_edit);
+                    ui.text_edit_singleline(&mut costume_edit.save_name);
                 });
+                if costume.j2000_timestamp.is_some() {
+                    ui.checkbox(&mut costume_edit.strip_timestamp, "Strip Timestamp");
+                    if costume_edit.strip_timestamp {
+                        costume_edit.timestamp = None;
+                    } else {
+                        costume_edit.timestamp = costume.j2000_timestamp;
+                    }
+                }
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                     ui.label("Account Name:");
-                    ui.text_edit_singleline(&mut account_name_edit);
+                    ui.text_edit_singleline(&mut costume_edit.account_name);
                 });
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                     ui.label("Character Name:");
-                    ui.text_edit_singleline(&mut character_name_edit);
+                    ui.text_edit_singleline(&mut costume_edit.character_name);
                 });
+
                 if ui.button("Save").clicked() {
+                    // let save = &saves[costume_file_name];
                     println!("TODO saving");
                 }
             } else {
                 ui.label("Select a save to view details");
             }
         });
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                 if ui.selectable_value(&mut display_type, DisplayType::DisplayName, "Display Name").clicked() {
@@ -242,22 +298,38 @@ fn main() {
             });
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
-                for save_id in ui_save_display.iter() {
-                    let save = saves.get(save_id).unwrap();
+                for save_file_name in ui_save_display.iter() {
+                    let save = &saves[save_file_name];
                     if ui.selectable_value(
-                        &mut selected_display,
-                        Some(save_id.clone()),
+                        &mut selected_costume,
+                        Some(save_file_name.clone()),
                         match display_type {
                             DisplayType::DisplayName => save.get_in_game_display_name(),
                             DisplayType::FileName => save.get_file_name(),
                         }
                     ).clicked() {
-                        save_name_edit = save.save_name.clone();
-                        account_name_edit = save.get_account_name().to_owned();
-                        character_name_edit = save.get_character_name().to_owned();
+                        let save_name = save.save_name.clone();
+                        let account_name = save.get_account_name().to_owned();
+                        let character_name = save.get_character_name().to_owned();
+                        let timestamp = save.j2000_timestamp;
+
+                        if let Some(costume_edit) = costume_edit.as_mut() {
+                            costume_edit.save_name = save_name;
+                            costume_edit.account_name = account_name;
+                            costume_edit.character_name = character_name;
+                        } else {
+                            costume_edit = Some(CostumeEdit {
+                                save_name,
+                                account_name,
+                                character_name,
+                                timestamp,
+                                ..Default::default()
+                            });
+                        }
                     }
                 }
             });
         });
+
     });
 }
