@@ -9,6 +9,43 @@ use jpeg::{
     APP13_RECORD_APP_OBJECT_DATA_PREVIEW,
 };
 
+trait CostumeDisplay {
+    fn get_account_name(&self) -> &str;
+    fn get_character_name(&self) -> &str;
+    fn get_save_name(&self) -> &str;
+    fn get_timestamp(&self) -> Option<i64>;
+
+    // FIXME The max date that the game can display is 2068-01-19 03:14:07 but we don't handle this
+    // edge case. Our simulated in-game display name datestring will go (almost) arbitrarily high.
+    fn get_in_game_display_name(&self) -> String {
+        let account_name = self.get_account_name();
+        let character_name = self.get_character_name();
+        let maybe_datetime_string = self.get_timestamp().and_then(|j2000_timestamp| {
+            const JAN_1_2000_UNIX_TIME: i64 = 946684800;
+            let unix_timestamp = JAN_1_2000_UNIX_TIME + j2000_timestamp;
+            chrono::DateTime::from_timestamp(unix_timestamp, 0)
+                .map(|utc_datetime| utc_datetime.format("%Y-%m-%d %H:%M:%S").to_string())
+        });
+
+        if let Some(datetime_string) = maybe_datetime_string {
+            format!("{}{} {}", account_name, character_name, datetime_string)
+        } else {
+            format!("{}{}", account_name, character_name)
+        }
+    }
+
+    /// Constructs and returns the full file name in one of two forms:
+    /// A) If timestamp is present: "Costume_savename_timestamp.jpg"
+    /// B) If timestamp not present: "Costume_savename.jpg"
+    fn get_file_name(&self) -> String {
+        if let Some(j2000_timestamp) = self.get_timestamp() {
+            format!("Costume_{}_{}.jpg", self.get_save_name(), j2000_timestamp)
+        } else {
+            format!("Costume_{}.jpg", self.get_save_name())
+        }
+    }
+}
+
 // TODO Error checking for things that get strings from raw bytes. Use from_utf8 instead of from_utf8_unchecked.
 // TODO Error checking wherever there's an unwrap (unless we're able to guarantee no failure ever)
 // TODO Slight refactors to DRY up code (the getters/setters have a lot in common)
@@ -127,34 +164,58 @@ impl CostumeSaveFile {
         datasets[0].data = value.into_bytes().into_boxed_slice();
     }
 
-    // FIXME The max date that the game can display is 2068-01-19 03:14:07 but we don't handle this
-    // edge case. Our simulated in-game display name datestring will go (almost) arbitrarily high.
-    fn get_in_game_display_name(&self) -> String {
-        let account_name = self.get_account_name();
-        let character_name = self.get_character_name();
-        let maybe_datetime_string = self.j2000_timestamp.and_then(|j2000_timestamp| {
-            const JAN_1_2000_UNIX_TIME: i64 = 946684800;
-            let unix_timestamp = JAN_1_2000_UNIX_TIME + j2000_timestamp;
-            chrono::DateTime::from_timestamp(unix_timestamp, 0)
-                .map(|utc_datetime| utc_datetime.format("%Y-%m-%d %H:%M:%S").to_string())
-        });
+}
 
-        if let Some(datetime_string) = maybe_datetime_string {
-            format!("{}{} {}", account_name, character_name, datetime_string)
-        } else {
-            format!("{}{}", account_name, character_name)
-        }
+impl CostumeDisplay for CostumeSaveFile {
+    #[inline(always)]
+    fn get_account_name(&self) -> &str {
+        self.get_account_name()
     }
 
-    /// Constructs and returns the full file name in one of two forms:
-    /// A) If timestamp is present: "Costume_savename_timestamp.jpg"
-    /// B) If timestamp not present: "Costume_savename.jpg"
-    fn get_file_name(&self) -> String {
-        if let Some(j2000_timestamp) = self.j2000_timestamp {
-            format!("Costume_{}_{}.jpg", self.save_name, j2000_timestamp)
-        } else {
-            format!("Costume_{}.jpg", self.save_name)
-        }
+    #[inline(always)]
+    fn get_character_name(&self) -> &str {
+        self.get_character_name()
+    }
+
+    #[inline(always)]
+    fn get_timestamp(&self) -> Option<i64> {
+        self.j2000_timestamp
+    }
+
+    #[inline(always)]
+    fn get_save_name(&self) -> &str {
+        &self.save_name
+    }
+}
+
+#[derive(Default)]
+struct CostumeEdit {
+    strip_timestamp: bool,
+    timestamp: Option<i64>,
+    save_name: String,
+    account_name: String,
+    character_name: String,
+}
+
+impl CostumeDisplay for CostumeEdit {
+    #[inline(always)]
+    fn get_account_name(&self) -> &str {
+        &self.account_name
+    }
+
+    #[inline(always)]
+    fn get_character_name(&self) -> &str {
+        &self.character_name
+    }
+
+    #[inline(always)]
+    fn get_save_name(&self) -> &str {
+        &self.save_name
+    }
+
+    #[inline(always)]
+    fn get_timestamp(&self) -> Option<i64> {
+        self.timestamp
     }
 }
 
@@ -182,15 +243,6 @@ fn main() {
         viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 720.0]),
         ..Default::default()
     };
-
-    #[derive(Default)]
-    struct CostumeEdit {
-        strip_timestamp: bool,
-        timestamp: Option<i64>,
-        save_name: String,
-        account_name: String,
-        character_name: String,
-    }
 
     // TODO maybe tie the selected costume and costume edit together so they can never get out of sync?
     let mut costume_edit: Option<CostumeEdit> = None;
@@ -223,38 +275,12 @@ fn main() {
                 // cache it in the CostumeEdit struct itself?
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                     ui.label("File Name:");
-                    // NOTE stolen from the CostumeSaveFile impl
-                    // TODO maybe make a trait that has the get_file_name and
-                    // get_in_game_display_name functions? Then stick it on the CostumeSaveFile and
-                    // the CostumeEdit structs?
-                    let file_name = if let Some(j2000_timestamp) = costume_edit.timestamp {
-                        format!("Costume_{}_{}.jpg", costume_edit.save_name, j2000_timestamp)
-                    } else {
-                        format!("Costume_{}.jpg", costume_edit.save_name)
-                    };
-                    ui.label(file_name);
+                    ui.label(costume_edit.get_file_name());
                 });
                 // FIXME again, don't want to construct this every frame
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                     ui.label("In-Game Display:");
-
-                    // NOTE also stolen from CostumeSaveFile impl
-                    let account_name = &costume_edit.account_name;
-                    let character_name = &costume_edit.character_name;
-                    let maybe_datetime_string = costume_edit.timestamp.and_then(|j2000_timestamp| {
-                        const JAN_1_2000_UNIX_TIME: i64 = 946684800;
-                        let unix_timestamp = JAN_1_2000_UNIX_TIME + j2000_timestamp;
-                        chrono::DateTime::from_timestamp(unix_timestamp, 0)
-                            .map(|utc_datetime| utc_datetime.format("%Y-%m-%d %H:%M:%S").to_string())
-                    });
-
-                    let value = if let Some(datetime_string) = maybe_datetime_string {
-                        format!("{}{} {}", account_name, character_name, datetime_string)
-                    } else {
-                        format!("{}{}", account_name, character_name)
-                    };
-
-                    ui.label(value);
+                    ui.label(costume_edit.get_in_game_display_name());
                 });
 
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
