@@ -442,9 +442,9 @@ fn main() {
     use std::collections::HashMap;
     let mut saves: HashMap<std::ffi::OsString, CostumeSaveFile> = HashMap::new();
     for entry in std::fs::read_dir(&costume_dir).unwrap().flatten() {
-        let path = entry.path();
-        if let Ok(costume_save) = CostumeSaveFile::new_from_path(path.as_path()) {
-            saves.insert(path.into_os_string(), costume_save);
+        let file_name = entry.file_name();
+        if let Ok(costume_save) = CostumeSaveFile::new_from_path(std::path::Path::new(&file_name)) {
+            saves.insert(file_name, costume_save);
         }
     }
 
