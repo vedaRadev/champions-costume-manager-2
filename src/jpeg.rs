@@ -459,9 +459,6 @@ impl Jpeg {
                 // we'll become misaligned and start bleeding into another segment, but we should
                 // hit another error such as InvalidSegmentMagic at that point).
                 JPEG_MARKER_APP13 => {
-                    // advance past the payload size bytes
-                    jpeg_raw.seek_relative(2)?;
-
                     let mut identifier: Vec<u8> = Vec::new();
                     jpeg_raw.read_until(0, &mut identifier)?;
 
