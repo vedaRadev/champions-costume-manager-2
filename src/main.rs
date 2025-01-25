@@ -446,6 +446,7 @@ fn main() {
                             costume_edit.save_name = save_name;
                             costume_edit.account_name = account_name;
                             costume_edit.character_name = character_name;
+                            costume_edit.timestamp = timestamp;
                         } else {
                             costume_edit = Some(CostumeEdit {
                                 save_name,
