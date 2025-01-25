@@ -9,6 +9,9 @@ use jpeg::{
     APP13_RECORD_APP_OBJECT_DATA_PREVIEW,
 };
 
+// TODO Revisit this. I'm not sure I like how this trait is used. Maybe I should just pull out
+// get_in_game_display_name() and get_file_name() into free-floating functions and just pass in all
+// the dependencies.
 trait CostumeDisplay {
     fn get_account_name(&self) -> &str;
     fn get_character_name(&self) -> &str;
@@ -38,10 +41,15 @@ trait CostumeDisplay {
     /// A) If timestamp is present: "Costume_savename_timestamp.jpg"
     /// B) If timestamp not present: "Costume_savename.jpg"
     fn get_file_name(&self) -> String {
+        let save_name = self.get_save_name();
         if let Some(j2000_timestamp) = self.get_timestamp() {
-            format!("Costume_{}_{}.jpg", self.get_save_name(), j2000_timestamp)
+            if save_name.is_empty() {
+                format!("Costume_{}.jpg", j2000_timestamp)
+            } else {
+                format!("Costume_{}_{}.jpg", save_name, j2000_timestamp)
+            }
         } else {
-            format!("Costume_{}.jpg", self.get_save_name())
+            format!("Costume_{}.jpg", save_name)
         }
     }
 }
@@ -89,9 +97,14 @@ impl CostumeSaveFile {
             .last().unwrap()
             .parse::<i64>().ok();
         let save_name = {
-            let save_name_start = file_stem.find("_").unwrap() + 1;
+            let save_name_start = file_stem.find("_").unwrap();
             let save_name_end = if j2000_timestamp.is_some() { file_stem.rfind("_").unwrap() } else { file_stem.len() };
-            file_stem[save_name_start .. save_name_end].to_owned()
+            // Technically the file name can just be "Costume_.jpg"
+            if save_name_start == save_name_end {
+                String::from("")
+            } else {
+                file_stem[save_name_start + 1 .. save_name_end].to_owned()
+            }
         };
         Ok(CostumeSaveFile {
             jpeg: costume_jpeg,
@@ -219,6 +232,8 @@ impl CostumeDisplay for CostumeEdit {
     }
 }
 
+use std::io::prelude::*;
+
 fn main() {
     let costume_dir = std::env::var("COSTUMES_DIR").expect("COSTUMES_DIR env var not set");
     std::env::set_current_dir(&costume_dir).expect("failed to set current directory to COSTUME_DIR");
@@ -244,6 +259,8 @@ fn main() {
         ..Default::default()
     };
 
+    let mut file_exists_warning_modal_open = false;
+
     // TODO maybe tie the selected costume and costume edit together so they can never get out of sync?
     let mut costume_edit: Option<CostumeEdit> = None;
     let mut selected_costume: Option<std::ffi::OsString> = None;
@@ -256,12 +273,21 @@ fn main() {
     // https://docs.rs/eframe/latest/eframe/
     _ = eframe::run_simple_native("Champions Costume Manager", options, move |ctx, _| {
 
+        if file_exists_warning_modal_open {
+            egui::Modal::new(egui::Id::new("File Exists Warning")).show(ctx, |ui| {
+                ui.label("A file with the same name already exists!");
+                if ui.button("Ok").clicked() {
+                    file_exists_warning_modal_open = false;
+                }
+            });
+        }
+
         egui::SidePanel::right("details_display").show(ctx, |ui| {
             // NOTE: For now we're just assuming that the selected costume and the costume edit
             // data are properly tied together. Maybe we should tie these together better so that
             // they can't possibly get out of sync.
             if let Some(costume_file_name) = selected_costume.as_ref() {
-                let costume = &saves[costume_file_name];
+                let costume = saves.get(costume_file_name).unwrap();
                 let costume_edit = costume_edit.as_mut().unwrap();
 
                 egui_extras::install_image_loaders(ctx);
@@ -304,9 +330,86 @@ fn main() {
                     ui.text_edit_singleline(&mut costume_edit.character_name);
                 });
 
+                // TODO If the user is not on windows, maybe we need to change how we're saving
+                // things. Instead of writing a new file then deleting the old and attempting to
+                // update the file creation times, maybe we should just overwrite the old so that
+                // we keep the file creation time.
+                // FIXME Logging, not crashing!
                 if ui.button("Save").clicked() {
-                    // let save = &saves[costume_file_name];
-                    println!("TODO saving");
+                    let old_file_name = costume_file_name;
+                    let new_file_name = std::ffi::OsString::from(costume_edit.get_file_name());
+                    let file_name_changed = *new_file_name != *old_file_name;
+
+                    if file_name_changed && saves.contains_key(&new_file_name) {
+                        file_exists_warning_modal_open = true;
+                    } else {
+                        let costume = saves.get_mut(costume_file_name).unwrap();
+                        costume.set_account_name(costume_edit.account_name.clone());
+                        costume.set_character_name(costume_edit.character_name.clone());
+                        costume.save_name = costume_edit.save_name.clone();
+                        costume.j2000_timestamp = costume_edit.timestamp;
+                        let serialized = costume.jpeg.serialize();
+
+                        let mut file = std::fs::File::create(&new_file_name).unwrap_or_else(|err| {
+                            eprintln!("Failed to open {:?} for writing: {err}", new_file_name);
+                            std::process::exit(1);
+                        });
+                        if let Err(err) = file.write_all(&serialized) {
+                            eprintln!("failed to write to file {:?}: {err}", new_file_name);
+                            std::process::exit(1);
+                        }
+
+                        if file_name_changed {
+                            #[cfg(windows)]
+                            {
+                                use std::os::windows::fs::FileTimesExt;
+                                let old_file = std::fs::File::open(old_file_name).unwrap_or_else(|err| {
+                                    eprintln!("failed to open original file {:?} for reading: {err}", old_file_name);
+                                    std::process::exit(1);
+                                });
+                                let old_metadata = old_file.metadata().unwrap_or_else(|err| {
+                                    eprintln!("failed to get metadata for original file {:?}: {err}", old_file_name);
+                                    std::process::exit(1);
+                                });
+                                let new_metadata = file.metadata().unwrap_or_else(|err| {
+                                    eprintln!("failed to get metadata for new file {new_file_name:?}: {err}");
+                                    std::process::exit(1);
+                                });
+                                // SAFETY: This section is conditionally compiled for windows so
+                                // setting/getting the file creation time should not error.
+                                let times = std::fs::FileTimes::new()
+                                    .set_created(old_metadata.created().unwrap())
+                                    .set_accessed(new_metadata.accessed().unwrap())
+                                    .set_modified(new_metadata.modified().unwrap());
+                                if let Err(err) = file.set_times(times) {
+                                    eprintln!("failed to update filetimes for {new_file_name:?}: {err}");
+                                    std::process::exit(1);
+                                }
+                            }
+
+                            if let Err(err) = std::fs::remove_file(old_file_name) {
+                                eprintln!("failed to remove original file {old_file_name:?}: {err}");
+                                std::process::exit(1);
+                            }
+
+                            // HACK for updating hashmap and display vec after save
+                            // TODO find a better way to do this (event system, periodic file system
+                            // scanning on another thread, whatever)
+                            {
+                                // TODO maybe temporary? Once periodic file system scanning is implemented,
+                                // might be able to get rid of this.
+                                let costume = saves.remove(old_file_name).unwrap();
+                                saves.insert(new_file_name.clone(), costume);
+                                // FIXME duplicated code. Maybe want some sort of event system?
+                                ui_save_display = saves.keys().cloned().collect();
+                                match display_type {
+                                    DisplayType::DisplayName => ui_save_display.sort_by_key(|k| saves[k].get_in_game_display_name()),
+                                    DisplayType::FileName => ui_save_display.sort(),
+                                }
+                                selected_costume = Some(new_file_name);
+                            }
+                        }
+                    }
                 }
             } else {
                 ui.label("Select a save to view details");
