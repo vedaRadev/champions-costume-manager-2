@@ -9,48 +9,30 @@ use jpeg::{
     APP13_RECORD_APP_OBJECT_DATA_PREVIEW,
 };
 
-// TODO Revisit this. I'm not sure I like how this trait is used. Maybe I should just pull out
-// get_in_game_display_name() and get_file_name() into free-floating functions and just pass in all
-// the dependencies.
-trait CostumeDisplay {
-    fn get_account_name(&self) -> &str;
-    fn get_character_name(&self) -> &str;
-    fn get_save_name(&self) -> &str;
-    fn get_timestamp(&self) -> Option<i64>;
+fn get_in_game_display_name(account_name: &str, character_name: &str, timestamp: Option<i64>) -> String {
+    let maybe_datetime_string = timestamp.and_then(|j2000_timestamp| {
+        const JAN_1_2000_UNIX_TIME: i64 = 946684800;
+        let unix_timestamp = JAN_1_2000_UNIX_TIME + j2000_timestamp;
+        chrono::DateTime::from_timestamp(unix_timestamp, 0)
+            .map(|utc_datetime| utc_datetime.format("%Y-%m-%d %H:%M:%S").to_string())
+    });
 
-    // FIXME The max date that the game can display is 2068-01-19 03:14:07 but we don't handle this
-    // edge case. Our simulated in-game display name datestring will go (almost) arbitrarily high.
-    fn get_in_game_display_name(&self) -> String {
-        let account_name = self.get_account_name();
-        let character_name = self.get_character_name();
-        let maybe_datetime_string = self.get_timestamp().and_then(|j2000_timestamp| {
-            const JAN_1_2000_UNIX_TIME: i64 = 946684800;
-            let unix_timestamp = JAN_1_2000_UNIX_TIME + j2000_timestamp;
-            chrono::DateTime::from_timestamp(unix_timestamp, 0)
-                .map(|utc_datetime| utc_datetime.format("%Y-%m-%d %H:%M:%S").to_string())
-        });
-
-        if let Some(datetime_string) = maybe_datetime_string {
-            format!("{}{} {}", account_name, character_name, datetime_string)
-        } else {
-            format!("{}{}", account_name, character_name)
-        }
+    if let Some(datetime_string) = maybe_datetime_string {
+        format!("{}{} {}", account_name, character_name, datetime_string)
+    } else {
+        format!("{}{}", account_name, character_name)
     }
+}
 
-    /// Constructs and returns the full file name in one of two forms:
-    /// A) If timestamp is present: "Costume_savename_timestamp.jpg"
-    /// B) If timestamp not present: "Costume_savename.jpg"
-    fn get_file_name(&self) -> String {
-        let save_name = self.get_save_name();
-        if let Some(j2000_timestamp) = self.get_timestamp() {
-            if save_name.is_empty() {
-                format!("Costume_{}.jpg", j2000_timestamp)
-            } else {
-                format!("Costume_{}_{}.jpg", save_name, j2000_timestamp)
-            }
+fn get_file_name(save_name: &str, timestamp: Option<i64>) -> String {
+    if let Some(j2000_timestamp) = timestamp {
+        if save_name.is_empty() {
+            format!("Costume_{}.jpg", j2000_timestamp)
         } else {
-            format!("Costume_{}.jpg", save_name)
+            format!("Costume_{}_{}.jpg", save_name, j2000_timestamp)
         }
+    } else {
+        format!("Costume_{}.jpg", save_name)
     }
 }
 
@@ -179,57 +161,22 @@ impl CostumeSaveFile {
 
 }
 
-impl CostumeDisplay for CostumeSaveFile {
-    #[inline(always)]
-    fn get_account_name(&self) -> &str {
-        self.get_account_name()
-    }
+#[derive(PartialEq)]
+enum CostumeEditType { Simple, Advanced }
 
-    #[inline(always)]
-    fn get_character_name(&self) -> &str {
-        self.get_character_name()
-    }
-
-    #[inline(always)]
-    fn get_timestamp(&self) -> Option<i64> {
-        self.j2000_timestamp
-    }
-
-    #[inline(always)]
-    fn get_save_name(&self) -> &str {
-        &self.save_name
-    }
+impl Default for CostumeEditType {
+    fn default() -> Self { Self::Simple }
 }
 
 #[derive(Default)]
 struct CostumeEdit {
+    edit_type: CostumeEditType,
     strip_timestamp: bool,
     timestamp: Option<i64>,
+    simple_name: String,
     save_name: String,
     account_name: String,
     character_name: String,
-}
-
-impl CostumeDisplay for CostumeEdit {
-    #[inline(always)]
-    fn get_account_name(&self) -> &str {
-        &self.account_name
-    }
-
-    #[inline(always)]
-    fn get_character_name(&self) -> &str {
-        &self.character_name
-    }
-
-    #[inline(always)]
-    fn get_save_name(&self) -> &str {
-        &self.save_name
-    }
-
-    #[inline(always)]
-    fn get_timestamp(&self) -> Option<i64> {
-        self.timestamp
-    }
 }
 
 use std::io::prelude::*;
@@ -301,12 +248,23 @@ fn main() {
                 // cache it in the CostumeEdit struct itself?
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                     ui.label("File Name:");
-                    ui.label(costume_edit.get_file_name());
+                    ui.label(get_file_name(&costume_edit.save_name, costume_edit.timestamp));
                 });
                 // FIXME again, don't want to construct this every frame
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                     ui.label("In-Game Display:");
-                    ui.label(costume_edit.get_in_game_display_name());
+                    ui.label(match costume_edit.edit_type {
+                        CostumeEditType::Simple => get_in_game_display_name(&costume_edit.simple_name, "", costume_edit.timestamp),
+                        CostumeEditType::Advanced => get_in_game_display_name(&costume_edit.account_name, &costume_edit.character_name, costume_edit.timestamp),
+                    });
+                });
+
+                ui.separator();
+
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                    ui.label("Edit Type:");
+                    ui.selectable_value(&mut costume_edit.edit_type, CostumeEditType::Simple, "Simple");
+                    ui.selectable_value(&mut costume_edit.edit_type, CostumeEditType::Advanced, "Advanced");
                 });
 
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
@@ -321,14 +279,22 @@ fn main() {
                         costume_edit.timestamp = costume.j2000_timestamp;
                     }
                 }
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
-                    ui.label("Account Name:");
-                    ui.text_edit_singleline(&mut costume_edit.account_name);
-                });
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
-                    ui.label("Character Name:");
-                    ui.text_edit_singleline(&mut costume_edit.character_name);
-                });
+
+                if costume_edit.edit_type == CostumeEditType::Simple {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                        ui.label("Name (in-game):");
+                        ui.text_edit_singleline(&mut costume_edit.simple_name);
+                    });
+                } else {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                        ui.label("Account Name:");
+                        ui.text_edit_singleline(&mut costume_edit.account_name);
+                    });
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                        ui.label("Character Name:");
+                        ui.text_edit_singleline(&mut costume_edit.character_name);
+                    });
+                }
 
                 // TODO If the user is not on windows, maybe we need to change how we're saving
                 // things. Instead of writing a new file then deleting the old and attempting to
@@ -337,17 +303,22 @@ fn main() {
                 // FIXME Logging, not crashing!
                 if ui.button("Save").clicked() {
                     let old_file_name = costume_file_name;
-                    let new_file_name = std::ffi::OsString::from(costume_edit.get_file_name());
+                    let new_file_name = std::ffi::OsString::from(get_file_name(&costume_edit.save_name, costume_edit.timestamp));
                     let file_name_changed = *new_file_name != *old_file_name;
 
                     if file_name_changed && saves.contains_key(&new_file_name) {
                         file_exists_warning_modal_open = true;
                     } else {
                         let costume = saves.get_mut(costume_file_name).unwrap();
-                        costume.set_account_name(costume_edit.account_name.clone());
-                        costume.set_character_name(costume_edit.character_name.clone());
                         costume.save_name = costume_edit.save_name.clone();
                         costume.j2000_timestamp = costume_edit.timestamp;
+                        if costume_edit.edit_type == CostumeEditType::Simple {
+                            costume.set_account_name(costume_edit.simple_name.clone());
+                            costume.set_character_name(String::from(""));
+                        } else {
+                            costume.set_account_name(costume_edit.account_name.clone());
+                            costume.set_character_name(costume_edit.character_name.clone());
+                        }
                         let serialized = costume.jpeg.serialize();
 
                         let mut file = std::fs::File::create(&new_file_name).unwrap_or_else(|err| {
@@ -395,6 +366,11 @@ fn main() {
                             // HACK for updating hashmap and display vec after save
                             // TODO find a better way to do this (event system, periodic file system
                             // scanning on another thread, whatever)
+                            // FIXME _reselect_ the costume after saving. We need to repopulate
+                            // CostumeEdit data with the new data in the file itself. For example,
+                            // if we do a Simple save then swap to the Advanced view, the account
+                            // and character fields are still populated with fields from the last
+                            // selection even though the file now doesn't have a character name.
                             {
                                 // TODO maybe temporary? Once periodic file system scanning is implemented,
                                 // might be able to get rid of this.
@@ -403,7 +379,10 @@ fn main() {
                                 // FIXME duplicated code. Maybe want some sort of event system?
                                 ui_save_display = saves.keys().cloned().collect();
                                 match display_type {
-                                    DisplayType::DisplayName => ui_save_display.sort_by_key(|k| saves[k].get_in_game_display_name()),
+                                    DisplayType::DisplayName => ui_save_display.sort_by_key(|k| {
+                                        let save = &saves[k];
+                                        get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp)
+                                    }),
                                     DisplayType::FileName => ui_save_display.sort(),
                                 }
                                 selected_costume = Some(new_file_name);
@@ -419,7 +398,10 @@ fn main() {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                 if ui.selectable_value(&mut display_type, DisplayType::DisplayName, "Display Name").clicked() {
-                    ui_save_display.sort_by_key(|k| saves[k].get_in_game_display_name());
+                    ui_save_display.sort_by_key(|k| {
+                        let save = &saves[k];
+                        get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp)
+                    });
                 }
                 if ui.selectable_value(&mut display_type, DisplayType::FileName, "File Name").clicked() {
                     ui_save_display.sort();
@@ -433,22 +415,25 @@ fn main() {
                         &mut selected_costume,
                         Some(save_file_name.clone()),
                         match display_type {
-                            DisplayType::DisplayName => save.get_in_game_display_name(),
-                            DisplayType::FileName => save.get_file_name(),
+                            DisplayType::DisplayName => get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp),
+                            DisplayType::FileName => get_file_name(&save.save_name, save.j2000_timestamp),
                         }
                     ).clicked() {
                         let save_name = save.save_name.clone();
                         let account_name = save.get_account_name().to_owned();
                         let character_name = save.get_character_name().to_owned();
                         let timestamp = save.j2000_timestamp;
+                        let simple_name = format!("{}{}", account_name, character_name);
 
                         if let Some(costume_edit) = costume_edit.as_mut() {
                             costume_edit.save_name = save_name;
+                            costume_edit.simple_name = simple_name;
                             costume_edit.account_name = account_name;
                             costume_edit.character_name = character_name;
                             costume_edit.timestamp = timestamp;
                         } else {
                             costume_edit = Some(CostumeEdit {
+                                simple_name,
                                 save_name,
                                 account_name,
                                 character_name,
