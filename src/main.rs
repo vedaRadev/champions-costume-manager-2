@@ -176,7 +176,8 @@ impl CostumeSaveFile {
 }
 
 enum UiMessage {
-    FileListChanged
+    FileListChanged,
+    FileRenamed { old: OsString, new: OsString },
 }
 
 #[derive(PartialEq)]
@@ -262,6 +263,17 @@ impl eframe::App for App {
                     self.sorted_saves = saves.keys().cloned().collect();
                     Self::sort_saves(self.display_type, &mut self.sorted_saves, &saves);
                 },
+
+                UiMessage::FileRenamed { old, new } => {
+                    if self.selected_costume.as_ref().is_some_and(|v| *v == old) {
+                        self.selected_costume = Some(new.clone());
+                    }
+
+                    let save = saves.remove(&old).unwrap();
+                    saves.insert(new, save);
+                    self.sorted_saves = saves.keys().cloned().collect();
+                    Self::sort_saves(self.display_type, &mut self.sorted_saves, &saves);
+                }
             }
         }
 
@@ -408,28 +420,7 @@ impl eframe::App for App {
                                 std::process::exit(1);
                             }
 
-                            // HACK for updating hashmap and display vec after save
-                            // TODO find a better way to do this (event system, periodic file system
-                            // scanning on another thread, whatever)
-                            // FIXME _reselect_ the costume after saving. We need to repopulate
-                            // CostumeEdit data with the new data in the file itself. For example,
-                            // if we do a Simple save then swap to the Advanced view, the account
-                            // and character fields are still populated with fields from the last
-                            // selection even though the file now doesn't have a character name.
-                            {
-                                // TODO maybe temporary? Once periodic file system scanning is implemented,
-                                // might be able to get rid of this.
-                                // Maybe use a ui message to notify that a file should be removed
-                                // or added?
-                                let costume = saves.remove(old_file_name).unwrap();
-                                saves.insert(new_file_name.clone(), costume);
-
-                                // FIXME maybe go through the little ui messaging system to signal
-                                // that an update is needed.
-                                self.sorted_saves = saves.keys().cloned().collect();
-                                App::sort_saves(self.display_type, &mut self.sorted_saves, &saves);
-                                self.selected_costume = Some(new_file_name);
-                            }
+                            _ = self.ui_message_tx.send(UiMessage::FileRenamed { old: old_file_name.clone(), new: new_file_name });
                         }
                     }
                 }
