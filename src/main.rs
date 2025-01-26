@@ -260,6 +260,12 @@ impl eframe::App for App {
         while let Ok(notification) = self.ui_message_rx.try_recv() {
             match notification {
                 UiMessage::FileListChanged => {
+                    // The file the user was viewing was removed or renamed
+                    if self.selected_costume.as_ref().is_some_and(|v| !saves.contains_key(v)) {
+                        self.selected_costume = None;
+                        self.costume_edit = None;
+                    }
+
                     self.sorted_saves = saves.keys().cloned().collect();
                     Self::sort_saves(self.display_type, &mut self.sorted_saves, &saves);
                 },
