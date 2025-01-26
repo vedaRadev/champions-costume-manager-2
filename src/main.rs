@@ -467,6 +467,7 @@ impl eframe::App for App {
                             costume_edit.account_name = account_name;
                             costume_edit.character_name = character_name;
                             costume_edit.timestamp = timestamp;
+                            costume_edit.strip_timestamp = false;
                         } else {
                             self.costume_edit = Some(CostumeEdit {
                                 simple_name,
