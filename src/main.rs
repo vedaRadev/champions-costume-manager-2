@@ -200,6 +200,9 @@ struct CostumeEdit {
 #[derive(PartialEq, Copy, Clone)]
 enum DisplayType { DisplayName, FileName }
 
+#[derive(PartialEq, Copy, Clone)]
+enum SortType { Name, CreationTime, ModifiedTime }
+
 // TODO maybe tie the selected costume and costume edit together so they can never get out of sync?
 struct App {
     saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>>,
@@ -210,6 +213,7 @@ struct App {
     sorted_saves: Vec<OsString>,
     selected_costume: Option<OsString>,
     display_type: DisplayType,
+    sort_type: SortType,
     costume_edit: Option<CostumeEdit>,
 }
 
@@ -231,29 +235,51 @@ impl App {
             sorted_saves: vec![],
             selected_costume: None,
             display_type: DisplayType::DisplayName,
+            sort_type: SortType::Name,
             costume_edit: None,
         }
     }
 
-    fn sort_saves(display_type: DisplayType, keys_to_sort: &mut [OsString], locked_saves: &std::sync::MutexGuard<HashMap<OsString, CostumeSaveFile>>) {
-        match display_type {
-            DisplayType::DisplayName => {
+    fn sort_saves(sort_type: SortType, display_type: DisplayType, keys_to_sort: &mut [OsString], locked_saves: &std::sync::MutexGuard<HashMap<OsString, CostumeSaveFile>>) {
+        match sort_type {
+            SortType::Name => {
+                match display_type {
+                    DisplayType::DisplayName => {
+                        keys_to_sort.sort_by_key(|k| {
+                            let save = &locked_saves[k];
+                            get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp)
+                        });
+                    },
+
+                    DisplayType::FileName => {
+                        keys_to_sort.sort();
+                    },
+                }
+            },
+
+            SortType::CreationTime => {
                 keys_to_sort.sort_by_key(|k| {
-                    let save = &locked_saves[k];
-                    get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp)
+                    let metadata = fs::metadata(k).unwrap();
+                    std::cmp::Reverse(metadata.created().unwrap())
                 });
             },
 
-            DisplayType::FileName => {
-                keys_to_sort.sort();
-            },
-        }
+            SortType::ModifiedTime => {
+                keys_to_sort.sort_by_key(|k| {
+                    let metadata = fs::metadata(k).unwrap();
+                    std::cmp::Reverse(metadata.modified().unwrap())
+                });
+            }
+        };
     }
 }
 
 impl eframe::App for App {
     // TODO once in-house jpeg image decoding (SOS) is implemented we can probably get rid of the
     // image and maybe a few of the egui_extras dependencies
+    // TODO Make a pass over this update function and figure out what kinds of things (if any)
+    // should go through the UiMessage system. It was originally created so the UI can re-sort
+    // whenever the scanning thread detects that files were added/removed underneath the GUI.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut saves = self.saves.lock().unwrap();
 
@@ -267,7 +293,7 @@ impl eframe::App for App {
                     }
 
                     self.sorted_saves = saves.keys().cloned().collect();
-                    Self::sort_saves(self.display_type, &mut self.sorted_saves, &saves);
+                    Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
                 },
 
                 UiMessage::FileRenamed { old, new } => {
@@ -278,7 +304,7 @@ impl eframe::App for App {
                     let save = saves.remove(&old).unwrap();
                     saves.insert(new, save);
                     self.sorted_saves = saves.keys().cloned().collect();
-                    Self::sort_saves(self.display_type, &mut self.sorted_saves, &saves);
+                    Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
                 }
             }
         }
@@ -427,6 +453,10 @@ impl eframe::App for App {
                             }
 
                             _ = self.ui_message_tx.send(UiMessage::FileRenamed { old: old_file_name.clone(), new: new_file_name });
+                        } else if matches!(self.sort_type, SortType::CreationTime | SortType::ModifiedTime) {
+                            // normal save
+                            // TODO maybe also send this through the ui message system?
+                            Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
                         }
                     }
                 }
@@ -437,10 +467,20 @@ impl eframe::App for App {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                ui.label("Display:");
                 let display_name_button = ui.selectable_value(&mut self.display_type, DisplayType::DisplayName, "Display Name");
                 let file_name_button = ui.selectable_value(&mut self.display_type, DisplayType::FileName, "File Name");
-                if display_name_button.clicked() || file_name_button.clicked() {
-                    Self::sort_saves(self.display_type, &mut self.sorted_saves, &saves);
+                if self.sort_type == SortType::Name && (display_name_button.clicked() || file_name_button.clicked()) {
+                    Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
+                }
+            });
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                ui.label("Sort:");
+                let name_button = ui.selectable_value(&mut self.sort_type, SortType::Name, "Name");
+                let creation_time_button = ui.selectable_value(&mut self.sort_type, SortType::CreationTime, "Creation Time");
+                let modified_time_button = ui.selectable_value(&mut self.sort_type, SortType::ModifiedTime, "Modified Time");
+                if name_button.clicked() || creation_time_button.clicked() || modified_time_button.clicked() {
+                    Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
                 }
             });
             ui.separator();
@@ -504,6 +544,8 @@ fn main() {
             // TODO maybe store some struct that contains the last modified date of the file and the
             // costume save metadata? Then if the file was modified underneath us we can reload it.
             // struct Something { last_modified: LastModifiedTimestamp, save: CostumeSaveFile }
+            // NOTE If we do this, then we don't have to get the file metadata during sorting since
+            // it'll already be here in the hashmap.
             let saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>> = Arc::new(Mutex::new(HashMap::new()));
 
             {
