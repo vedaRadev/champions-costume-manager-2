@@ -9,6 +9,15 @@ use jpeg::{
     APP13_RECORD_APP_OBJECT_DATA_PREVIEW,
 };
 
+use std::{
+    collections::HashMap,
+    io::prelude::*,
+    ffi::OsString,
+    path::Path,
+    env,
+    fs,
+};
+
 fn get_in_game_display_name(account_name: &str, character_name: &str, timestamp: Option<i64>) -> String {
     let maybe_datetime_string = timestamp.and_then(|j2000_timestamp| {
         const JAN_1_2000_UNIX_TIME: i64 = 946684800;
@@ -68,8 +77,8 @@ impl CostumeSaveFile {
     // - resource type is "8BIM" (as a u32)
     // - resource id is 0x0404
     // - resource name is "\0\0" 
-    fn new_from_path(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let jpeg_raw = std::fs::read(path)?;
+    fn new_from_path(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let jpeg_raw = fs::read(path)?;
         let costume_jpeg = Jpeg::parse(jpeg_raw)?;
         let file_stem = path
             .file_stem().unwrap()
@@ -179,16 +188,13 @@ struct CostumeEdit {
     character_name: String,
 }
 
-use std::io::prelude::*;
-
 fn main() {
-    let costume_dir = std::env::var("COSTUMES_DIR").expect("COSTUMES_DIR env var not set");
-    std::env::set_current_dir(&costume_dir).expect("failed to set current directory to COSTUME_DIR");
-    use std::collections::HashMap;
-    let mut saves: HashMap<std::ffi::OsString, CostumeSaveFile> = HashMap::new();
-    for entry in std::fs::read_dir(&costume_dir).unwrap().flatten() {
+    let costume_dir = env::var("COSTUMES_DIR").expect("COSTUMES_DIR env var not set");
+    env::set_current_dir(&costume_dir).expect("failed to set current directory to COSTUME_DIR");
+    let mut saves: HashMap<OsString, CostumeSaveFile> = HashMap::new();
+    for entry in fs::read_dir(&costume_dir).unwrap().flatten() {
         let file_name = entry.file_name();
-        if let Ok(costume_save) = CostumeSaveFile::new_from_path(std::path::Path::new(&file_name)) {
+        if let Ok(costume_save) = CostumeSaveFile::new_from_path(Path::new(&file_name)) {
             saves.insert(file_name, costume_save);
         }
     }
@@ -197,7 +203,7 @@ fn main() {
     enum DisplayType { DisplayName, FileName }
     let mut display_type = DisplayType::DisplayName;
 
-    let mut ui_save_display: Vec<std::ffi::OsString> = saves.keys().cloned().collect();
+    let mut ui_save_display: Vec<OsString> = saves.keys().cloned().collect();
     ui_save_display.sort();
 
     use eframe::egui;
@@ -210,7 +216,7 @@ fn main() {
 
     // TODO maybe tie the selected costume and costume edit together so they can never get out of sync?
     let mut costume_edit: Option<CostumeEdit> = None;
-    let mut selected_costume: Option<std::ffi::OsString> = None;
+    let mut selected_costume: Option<OsString> = None;
 
     // TODO once in-house jpeg image decoding (SOS) is implemented we can probably get rid of the
     // image and maybe a few of the egui_extras dependencies
@@ -303,7 +309,7 @@ fn main() {
                 // FIXME Logging, not crashing!
                 if ui.button("Save").clicked() {
                     let old_file_name = costume_file_name;
-                    let new_file_name = std::ffi::OsString::from(get_file_name(&costume_edit.save_name, costume_edit.timestamp));
+                    let new_file_name = OsString::from(get_file_name(&costume_edit.save_name, costume_edit.timestamp));
                     let file_name_changed = *new_file_name != *old_file_name;
 
                     if file_name_changed && saves.contains_key(&new_file_name) {
@@ -321,7 +327,7 @@ fn main() {
                         }
                         let serialized = costume.jpeg.serialize();
 
-                        let mut file = std::fs::File::create(&new_file_name).unwrap_or_else(|err| {
+                        let mut file = fs::File::create(&new_file_name).unwrap_or_else(|err| {
                             eprintln!("Failed to open {:?} for writing: {err}", new_file_name);
                             std::process::exit(1);
                         });
@@ -334,7 +340,7 @@ fn main() {
                             #[cfg(windows)]
                             {
                                 use std::os::windows::fs::FileTimesExt;
-                                let old_file = std::fs::File::open(old_file_name).unwrap_or_else(|err| {
+                                let old_file = fs::File::open(old_file_name).unwrap_or_else(|err| {
                                     eprintln!("failed to open original file {:?} for reading: {err}", old_file_name);
                                     std::process::exit(1);
                                 });
@@ -348,7 +354,7 @@ fn main() {
                                 });
                                 // SAFETY: This section is conditionally compiled for windows so
                                 // setting/getting the file creation time should not error.
-                                let times = std::fs::FileTimes::new()
+                                let times = fs::FileTimes::new()
                                     .set_created(old_metadata.created().unwrap())
                                     .set_accessed(new_metadata.accessed().unwrap())
                                     .set_modified(new_metadata.modified().unwrap());
@@ -358,7 +364,7 @@ fn main() {
                                 }
                             }
 
-                            if let Err(err) = std::fs::remove_file(old_file_name) {
+                            if let Err(err) = fs::remove_file(old_file_name) {
                                 eprintln!("failed to remove original file {old_file_name:?}: {err}");
                                 std::process::exit(1);
                             }
