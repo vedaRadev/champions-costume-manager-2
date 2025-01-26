@@ -419,21 +419,15 @@ impl eframe::App for App {
                             {
                                 // TODO maybe temporary? Once periodic file system scanning is implemented,
                                 // might be able to get rid of this.
+                                // Maybe use a ui message to notify that a file should be removed
+                                // or added?
                                 let costume = saves.remove(old_file_name).unwrap();
                                 saves.insert(new_file_name.clone(), costume);
 
-                                // // NOTE Don't need this while we're recreating ui_save_display
-                                // // every frame.
-                                // // FIXME duplicated code. Maybe want some sort of event system?
-                                // ui_save_display = saves.keys().cloned().collect();
-                                // match display_type {
-                                //     DisplayType::DisplayName => ui_save_display.sort_by_key(|k| {
-                                //         let save = &saves[k];
-                                //         get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp)
-                                //     }),
-                                //     DisplayType::FileName => ui_save_display.sort(),
-                                // }
-
+                                // FIXME maybe go through the little ui messaging system to signal
+                                // that an update is needed.
+                                self.sorted_saves = saves.keys().cloned().collect();
+                                App::sort_saves(self.display_type, &mut self.sorted_saves, &saves);
                                 self.selected_costume = Some(new_file_name);
                             }
                         }
