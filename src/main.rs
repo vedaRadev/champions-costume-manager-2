@@ -10,12 +10,15 @@ use jpeg::{
 };
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::prelude::*,
     ffi::OsString,
     path::Path,
     env,
     fs,
+    sync::{Arc, Mutex},
+    thread,
+    time::{Duration, SystemTime},
 };
 
 fn get_in_game_display_name(account_name: &str, character_name: &str, timestamp: Option<i64>) -> String {
@@ -191,20 +194,46 @@ struct CostumeEdit {
 fn main() {
     let costume_dir = env::var("COSTUMES_DIR").expect("COSTUMES_DIR env var not set");
     env::set_current_dir(&costume_dir).expect("failed to set current directory to COSTUME_DIR");
-    let mut saves: HashMap<OsString, CostumeSaveFile> = HashMap::new();
-    for entry in fs::read_dir(&costume_dir).unwrap().flatten() {
-        let file_name = entry.file_name();
-        if let Ok(costume_save) = CostumeSaveFile::new_from_path(Path::new(&file_name)) {
-            saves.insert(file_name, costume_save);
-        }
+
+    // TODO maybe store some struct that contains the last modified date of the file and the
+    // costume save metadata? Then if the file was modified underneath us we can reload it.
+    // struct Something { last_modified: LastModifiedTimestamp, save: CostumeSaveFile }
+    let saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>> = Arc::new(Mutex::new(HashMap::new()));
+
+    {
+        let saves = Arc::clone(&saves);
+        thread::spawn(move || {
+            let mut last_modified_time: Option<SystemTime> = None;
+            loop {
+                let modified_time = fs::metadata(&costume_dir).unwrap().modified().unwrap();
+                if last_modified_time.is_none_or(|lmt| modified_time != lmt) {
+                    last_modified_time = Some(modified_time);
+                    let mut saves = saves.lock().unwrap();
+                    let mut missing_files: HashSet<OsString> = HashSet::from_iter(saves.keys().cloned());
+                    for entry in fs::read_dir(&costume_dir).unwrap().flatten() {
+                        // TODO check that the file starts with Costume_ and is a jpeg file. If not,
+                        // continue. Should that logic be a part of CostumeSaveFile?
+                        let file_name = entry.file_name();
+                        #[allow(clippy::map_entry)]
+                        if saves.contains_key(&file_name) {
+                            missing_files.remove(&file_name);
+                            // TODO maybe log if we failed to parse the costume save?
+                        } else if let Ok(save) = CostumeSaveFile::new_from_path(Path::new(&file_name)) {
+                            saves.insert(file_name, save);
+                        }
+                    }
+                    for missing_file in missing_files {
+                        saves.remove(&missing_file);
+                    }
+                }
+                thread::sleep(Duration::from_millis(1000));
+            }
+        });
     }
 
     #[derive(PartialEq)]
     enum DisplayType { DisplayName, FileName }
     let mut display_type = DisplayType::DisplayName;
-
-    let mut ui_save_display: Vec<OsString> = saves.keys().cloned().collect();
-    ui_save_display.sort();
 
     use eframe::egui;
     let options = eframe::NativeOptions {
@@ -225,6 +254,16 @@ fn main() {
     // eframe and use eframe::run_native() instead of eframe::run_simple_native().
     // https://docs.rs/eframe/latest/eframe/
     _ = eframe::run_simple_native("Champions Costume Manager", options, move |ctx, _| {
+        let mut saves = saves.lock().unwrap();
+        // FIXME Should NOT be doing this every frame
+        let mut ui_save_display: Vec<OsString> = saves.keys().cloned().collect();
+        match display_type {
+            DisplayType::DisplayName => ui_save_display.sort_by_key(|k| {
+                let save = &saves[k];
+                get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp)
+            }),
+            DisplayType::FileName => ui_save_display.sort(),
+        }
 
         if file_exists_warning_modal_open {
             egui::Modal::new(egui::Id::new("File Exists Warning")).show(ctx, |ui| {
@@ -382,15 +421,19 @@ fn main() {
                                 // might be able to get rid of this.
                                 let costume = saves.remove(old_file_name).unwrap();
                                 saves.insert(new_file_name.clone(), costume);
-                                // FIXME duplicated code. Maybe want some sort of event system?
-                                ui_save_display = saves.keys().cloned().collect();
-                                match display_type {
-                                    DisplayType::DisplayName => ui_save_display.sort_by_key(|k| {
-                                        let save = &saves[k];
-                                        get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp)
-                                    }),
-                                    DisplayType::FileName => ui_save_display.sort(),
-                                }
+
+                                // // NOTE Don't need this while we're recreating ui_save_display
+                                // // every frame.
+                                // // FIXME duplicated code. Maybe want some sort of event system?
+                                // ui_save_display = saves.keys().cloned().collect();
+                                // match display_type {
+                                //     DisplayType::DisplayName => ui_save_display.sort_by_key(|k| {
+                                //         let save = &saves[k];
+                                //         get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp)
+                                //     }),
+                                //     DisplayType::FileName => ui_save_display.sort(),
+                                // }
+
                                 selected_costume = Some(new_file_name);
                             }
                         }
