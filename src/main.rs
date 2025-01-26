@@ -9,6 +9,8 @@ use jpeg::{
     APP13_RECORD_APP_OBJECT_DATA_PREVIEW,
 };
 
+use eframe::egui;
+
 use std::{
     collections::{HashMap, HashSet},
     io::prelude::*,
@@ -175,7 +177,6 @@ impl CostumeSaveFile {
 
 #[derive(PartialEq)]
 enum CostumeEditType { Simple, Advanced }
-
 impl Default for CostumeEditType {
     fn default() -> Self { Self::Simple }
 }
@@ -191,73 +192,44 @@ struct CostumeEdit {
     character_name: String,
 }
 
-fn main() {
-    let costume_dir = env::var("COSTUMES_DIR").expect("COSTUMES_DIR env var not set");
-    env::set_current_dir(&costume_dir).expect("failed to set current directory to COSTUME_DIR");
+#[derive(PartialEq)]
+enum DisplayType { DisplayName, FileName }
+impl Default for DisplayType {
+    fn default() -> Self { Self::DisplayName }
+}
 
-    // TODO maybe store some struct that contains the last modified date of the file and the
-    // costume save metadata? Then if the file was modified underneath us we can reload it.
-    // struct Something { last_modified: LastModifiedTimestamp, save: CostumeSaveFile }
-    let saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>> = Arc::new(Mutex::new(HashMap::new()));
+#[derive(Default)]
+// TODO maybe tie the selected costume and costume edit together so they can never get out of sync?
+struct App {
+    file_exists_warning_modal_open: bool,
+    selected_costume: Option<OsString>,
+    saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>>,
+    display_type: DisplayType,
+    costume_edit: Option<CostumeEdit>,
+}
 
+impl App {
+    // TODO customization
+    fn new(
+        _cc: &eframe::CreationContext,
+        saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>>
+    ) -> Self
     {
-        let saves = Arc::clone(&saves);
-        thread::spawn(move || {
-            let mut last_modified_time: Option<SystemTime> = None;
-            loop {
-                let modified_time = fs::metadata(&costume_dir).unwrap().modified().unwrap();
-                if last_modified_time.is_none_or(|lmt| modified_time != lmt) {
-                    last_modified_time = Some(modified_time);
-                    let mut saves = saves.lock().unwrap();
-                    let mut missing_files: HashSet<OsString> = HashSet::from_iter(saves.keys().cloned());
-                    for entry in fs::read_dir(&costume_dir).unwrap().flatten() {
-                        // TODO check that the file starts with Costume_ and is a jpeg file. If not,
-                        // continue. Should that logic be a part of CostumeSaveFile?
-                        let file_name = entry.file_name();
-                        #[allow(clippy::map_entry)]
-                        if saves.contains_key(&file_name) {
-                            missing_files.remove(&file_name);
-                            // TODO maybe log if we failed to parse the costume save?
-                        } else if let Ok(save) = CostumeSaveFile::new_from_path(Path::new(&file_name)) {
-                            saves.insert(file_name, save);
-                        }
-                    }
-                    for missing_file in missing_files {
-                        saves.remove(&missing_file);
-                    }
-                }
-                thread::sleep(Duration::from_millis(1000));
-            }
-        });
+        Self {
+            saves,
+            ..Default::default()
+        }
     }
+}
 
-    #[derive(PartialEq)]
-    enum DisplayType { DisplayName, FileName }
-    let mut display_type = DisplayType::DisplayName;
-
-    use eframe::egui;
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 720.0]),
-        ..Default::default()
-    };
-
-    let mut file_exists_warning_modal_open = false;
-
-    // TODO maybe tie the selected costume and costume edit together so they can never get out of sync?
-    let mut costume_edit: Option<CostumeEdit> = None;
-    let mut selected_costume: Option<OsString> = None;
-
+impl eframe::App for App {
     // TODO once in-house jpeg image decoding (SOS) is implemented we can probably get rid of the
     // image and maybe a few of the egui_extras dependencies
-
-    // NOTE If we want to write app state to disk we need to enable the "persistence" feature for
-    // eframe and use eframe::run_native() instead of eframe::run_simple_native().
-    // https://docs.rs/eframe/latest/eframe/
-    _ = eframe::run_simple_native("Champions Costume Manager", options, move |ctx, _| {
-        let mut saves = saves.lock().unwrap();
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let mut saves = self.saves.lock().unwrap();
         // FIXME Should NOT be doing this every frame
         let mut ui_save_display: Vec<OsString> = saves.keys().cloned().collect();
-        match display_type {
+        match self.display_type {
             DisplayType::DisplayName => ui_save_display.sort_by_key(|k| {
                 let save = &saves[k];
                 get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp)
@@ -265,11 +237,11 @@ fn main() {
             DisplayType::FileName => ui_save_display.sort(),
         }
 
-        if file_exists_warning_modal_open {
+        if self.file_exists_warning_modal_open {
             egui::Modal::new(egui::Id::new("File Exists Warning")).show(ctx, |ui| {
                 ui.label("A file with the same name already exists!");
                 if ui.button("Ok").clicked() {
-                    file_exists_warning_modal_open = false;
+                    self.file_exists_warning_modal_open = false;
                 }
             });
         }
@@ -278,9 +250,9 @@ fn main() {
             // NOTE: For now we're just assuming that the selected costume and the costume edit
             // data are properly tied together. Maybe we should tie these together better so that
             // they can't possibly get out of sync.
-            if let Some(costume_file_name) = selected_costume.as_ref() {
+            if let Some(costume_file_name) = self.selected_costume.as_ref() {
                 let costume = saves.get(costume_file_name).unwrap();
-                let costume_edit = costume_edit.as_mut().unwrap();
+                let costume_edit = self.costume_edit.as_mut().unwrap();
 
                 egui_extras::install_image_loaders(ctx);
                 let file = format!("file://{}", costume_file_name.to_str().unwrap());
@@ -352,7 +324,7 @@ fn main() {
                     let file_name_changed = *new_file_name != *old_file_name;
 
                     if file_name_changed && saves.contains_key(&new_file_name) {
-                        file_exists_warning_modal_open = true;
+                        self.file_exists_warning_modal_open = true;
                     } else {
                         let costume = saves.get_mut(costume_file_name).unwrap();
                         costume.save_name = costume_edit.save_name.clone();
@@ -434,7 +406,7 @@ fn main() {
                                 //     DisplayType::FileName => ui_save_display.sort(),
                                 // }
 
-                                selected_costume = Some(new_file_name);
+                                self.selected_costume = Some(new_file_name);
                             }
                         }
                     }
@@ -446,13 +418,13 @@ fn main() {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
-                if ui.selectable_value(&mut display_type, DisplayType::DisplayName, "Display Name").clicked() {
+                if ui.selectable_value(&mut self.display_type, DisplayType::DisplayName, "Display Name").clicked() {
                     ui_save_display.sort_by_key(|k| {
                         let save = &saves[k];
                         get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp)
                     });
                 }
-                if ui.selectable_value(&mut display_type, DisplayType::FileName, "File Name").clicked() {
+                if ui.selectable_value(&mut self.display_type, DisplayType::FileName, "File Name").clicked() {
                     ui_save_display.sort();
                 }
             });
@@ -461,9 +433,9 @@ fn main() {
                 for save_file_name in ui_save_display.iter() {
                     let save = &saves[save_file_name];
                     if ui.selectable_value(
-                        &mut selected_costume,
+                        &mut self.selected_costume,
                         Some(save_file_name.clone()),
-                        match display_type {
+                        match self.display_type {
                             DisplayType::DisplayName => get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp),
                             DisplayType::FileName => get_file_name(&save.save_name, save.j2000_timestamp),
                         }
@@ -474,14 +446,14 @@ fn main() {
                         let timestamp = save.j2000_timestamp;
                         let simple_name = format!("{}{}", account_name, character_name);
 
-                        if let Some(costume_edit) = costume_edit.as_mut() {
+                        if let Some(costume_edit) = self.costume_edit.as_mut() {
                             costume_edit.save_name = save_name;
                             costume_edit.simple_name = simple_name;
                             costume_edit.account_name = account_name;
                             costume_edit.character_name = character_name;
                             costume_edit.timestamp = timestamp;
                         } else {
-                            costume_edit = Some(CostumeEdit {
+                            self.costume_edit = Some(CostumeEdit {
                                 simple_name,
                                 save_name,
                                 account_name,
@@ -495,5 +467,61 @@ fn main() {
             });
         });
 
-    });
+    }
+}
+
+fn main() {
+    let costume_dir = env::var("COSTUMES_DIR").expect("COSTUMES_DIR env var not set");
+    env::set_current_dir(&costume_dir).expect("failed to set current directory to COSTUME_DIR");
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 720.0]),
+        ..Default::default()
+    };
+
+    _ = eframe::run_native(
+        "Champions Costume Manager",
+        options,
+        Box::new(|cc| {
+            // TODO maybe store some struct that contains the last modified date of the file and the
+            // costume save metadata? Then if the file was modified underneath us we can reload it.
+            // struct Something { last_modified: LastModifiedTimestamp, save: CostumeSaveFile }
+            let saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>> = Arc::new(Mutex::new(HashMap::new()));
+
+            {
+                let saves = Arc::clone(&saves);
+                let frame = cc.egui_ctx.clone();
+                thread::spawn(move || {
+                    let mut last_modified_time: Option<SystemTime> = None;
+                    loop {
+                        let modified_time = fs::metadata(&costume_dir).unwrap().modified().unwrap();
+                        if last_modified_time.is_none_or(|lmt| modified_time != lmt) {
+                            last_modified_time = Some(modified_time);
+                            let mut saves = saves.lock().unwrap();
+                            let mut missing_files: HashSet<OsString> = HashSet::from_iter(saves.keys().cloned());
+                            for entry in fs::read_dir(&costume_dir).unwrap().flatten() {
+                                // TODO check that the file starts with Costume_ and is a jpeg file. If not,
+                                // continue. Should that logic be a part of CostumeSaveFile?
+                                let file_name = entry.file_name();
+                                #[allow(clippy::map_entry)]
+                                if saves.contains_key(&file_name) {
+                                    missing_files.remove(&file_name);
+                                    // TODO maybe log if we failed to parse the costume save?
+                                } else if let Ok(save) = CostumeSaveFile::new_from_path(Path::new(&file_name)) {
+                                    saves.insert(file_name, save);
+                                }
+                            }
+                            for missing_file in missing_files {
+                                saves.remove(&missing_file);
+                            }
+                            frame.request_repaint();
+                        }
+                        thread::sleep(Duration::from_millis(1000));
+                    }
+                });
+            }
+
+            Ok(Box::new(App::new(cc, saves)))
+        })
+    );
 }
