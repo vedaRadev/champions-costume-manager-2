@@ -18,7 +18,7 @@ use std::{
     path::Path,
     env,
     fs,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, SystemTime},
 };
@@ -175,6 +175,10 @@ impl CostumeSaveFile {
 
 }
 
+enum UiMessage {
+    FileListChanged
+}
+
 #[derive(PartialEq)]
 enum CostumeEditType { Simple, Advanced }
 impl Default for CostumeEditType {
@@ -192,18 +196,18 @@ struct CostumeEdit {
     character_name: String,
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Copy, Clone)]
 enum DisplayType { DisplayName, FileName }
-impl Default for DisplayType {
-    fn default() -> Self { Self::DisplayName }
-}
 
-#[derive(Default)]
 // TODO maybe tie the selected costume and costume edit together so they can never get out of sync?
 struct App {
-    file_exists_warning_modal_open: bool,
-    selected_costume: Option<OsString>,
     saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>>,
+    ui_message_tx: mpsc::Sender<UiMessage>,
+    ui_message_rx: mpsc::Receiver<UiMessage>,
+
+    file_exists_warning_modal_open: bool,
+    sorted_saves: Vec<OsString>,
+    selected_costume: Option<OsString>,
     display_type: DisplayType,
     costume_edit: Option<CostumeEdit>,
 }
@@ -212,12 +216,36 @@ impl App {
     // TODO customization
     fn new(
         _cc: &eframe::CreationContext,
-        saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>>
+        saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>>,
+        ui_message_tx: mpsc::Sender<UiMessage>,
+        ui_message_rx: mpsc::Receiver<UiMessage>,
     ) -> Self
     {
         Self {
             saves,
-            ..Default::default()
+            ui_message_tx,
+            ui_message_rx,
+
+            file_exists_warning_modal_open: false,
+            sorted_saves: vec![],
+            selected_costume: None,
+            display_type: DisplayType::DisplayName,
+            costume_edit: None,
+        }
+    }
+
+    fn sort_saves(display_type: DisplayType, keys_to_sort: &mut [OsString], locked_saves: &std::sync::MutexGuard<HashMap<OsString, CostumeSaveFile>>) {
+        match display_type {
+            DisplayType::DisplayName => {
+                keys_to_sort.sort_by_key(|k| {
+                    let save = &locked_saves[k];
+                    get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp)
+                });
+            },
+
+            DisplayType::FileName => {
+                keys_to_sort.sort();
+            },
         }
     }
 }
@@ -227,14 +255,14 @@ impl eframe::App for App {
     // image and maybe a few of the egui_extras dependencies
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut saves = self.saves.lock().unwrap();
-        // FIXME Should NOT be doing this every frame
-        let mut ui_save_display: Vec<OsString> = saves.keys().cloned().collect();
-        match self.display_type {
-            DisplayType::DisplayName => ui_save_display.sort_by_key(|k| {
-                let save = &saves[k];
-                get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp)
-            }),
-            DisplayType::FileName => ui_save_display.sort(),
+
+        while let Ok(notification) = self.ui_message_rx.try_recv() {
+            match notification {
+                UiMessage::FileListChanged => {
+                    self.sorted_saves = saves.keys().cloned().collect();
+                    Self::sort_saves(self.display_type, &mut self.sorted_saves, &saves);
+                },
+            }
         }
 
         if self.file_exists_warning_modal_open {
@@ -418,19 +446,15 @@ impl eframe::App for App {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
-                if ui.selectable_value(&mut self.display_type, DisplayType::DisplayName, "Display Name").clicked() {
-                    ui_save_display.sort_by_key(|k| {
-                        let save = &saves[k];
-                        get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp)
-                    });
-                }
-                if ui.selectable_value(&mut self.display_type, DisplayType::FileName, "File Name").clicked() {
-                    ui_save_display.sort();
+                let display_name_button = ui.selectable_value(&mut self.display_type, DisplayType::DisplayName, "Display Name");
+                let file_name_button = ui.selectable_value(&mut self.display_type, DisplayType::FileName, "File Name");
+                if display_name_button.clicked() || file_name_button.clicked() {
+                    Self::sort_saves(self.display_type, &mut self.sorted_saves, &saves);
                 }
             });
             ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
-                for save_file_name in ui_save_display.iter() {
+                for save_file_name in self.sorted_saves.iter() {
                     let save = &saves[save_file_name];
                     if ui.selectable_value(
                         &mut self.selected_costume,
@@ -483,6 +507,8 @@ fn main() {
         "Champions Costume Manager",
         options,
         Box::new(|cc| {
+            let (ui_message_tx, ui_message_rx) = mpsc::channel::<UiMessage>();
+
             // TODO maybe store some struct that contains the last modified date of the file and the
             // costume save metadata? Then if the file was modified underneath us we can reload it.
             // struct Something { last_modified: LastModifiedTimestamp, save: CostumeSaveFile }
@@ -491,6 +517,7 @@ fn main() {
             {
                 let saves = Arc::clone(&saves);
                 let frame = cc.egui_ctx.clone();
+                let ui_message_tx = ui_message_tx.clone();
                 thread::spawn(move || {
                     let mut last_modified_time: Option<SystemTime> = None;
                     loop {
@@ -514,6 +541,7 @@ fn main() {
                             for missing_file in missing_files {
                                 saves.remove(&missing_file);
                             }
+                            _ = ui_message_tx.send(UiMessage::FileListChanged);
                             frame.request_repaint();
                         }
                         thread::sleep(Duration::from_millis(1000));
@@ -521,7 +549,12 @@ fn main() {
                 });
             }
 
-            Ok(Box::new(App::new(cc, saves)))
+            Ok(Box::new(App::new(
+                cc,
+                saves,
+                ui_message_tx,
+                ui_message_rx,
+            )))
         })
     );
 }
