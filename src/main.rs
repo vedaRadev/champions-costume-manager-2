@@ -554,6 +554,15 @@ impl eframe::App for App {
                         }
                     }
                 }
+
+                if ui.button("Delete").clicked() {
+                    // TODO show confirmation popup before deleting
+                    fs::remove_file(costume_file_name).expect("Failed to delete file");
+                    saves.remove(costume_file_name);
+                    self.sorted_saves = saves.keys().cloned().collect();
+                    Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
+                    self.selected_costume = None;
+                }
             } else {
                 ui.label("Select a save to view details");
             }
