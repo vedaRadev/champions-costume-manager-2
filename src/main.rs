@@ -282,6 +282,7 @@ struct App {
     ui_message_rx: mpsc::Receiver<UiMessage>,
 
     file_exists_warning_modal_open: bool,
+    show_images_in_selection_list: bool,
     costume_spec_edit_open: bool,
     sorted_saves: Vec<OsString>,
     selected_costume: Option<OsString>,
@@ -305,6 +306,7 @@ impl App {
             ui_message_rx,
 
             file_exists_warning_modal_open: false,
+            show_images_in_selection_list: false,
             costume_spec_edit_open: false,
             sorted_saves: vec![],
             selected_costume: None,
@@ -596,6 +598,7 @@ impl eframe::App for App {
                 if self.sort_type == SortType::Name && (display_name_button.clicked() || file_name_button.clicked()) {
                     Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
                 }
+                ui.checkbox(&mut self.show_images_in_selection_list, "Show Images");
             });
             ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                 ui.label("Sort:");
@@ -607,17 +610,64 @@ impl eframe::App for App {
                 }
             });
             ui.separator();
+
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for save_file_name in self.sorted_saves.iter() {
                     let save = &saves[save_file_name];
-                    if ui.selectable_value(
-                        &mut self.selected_costume,
-                        Some(save_file_name.clone()),
-                        match self.display_type {
-                            DisplayType::DisplayName => get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp),
-                            DisplayType::FileName => get_file_name(&save.save_name, save.j2000_timestamp),
-                        }
-                    ).clicked() {
+                    let is_selected = self.selected_costume.as_ref().is_some_and(|v| v == save_file_name);
+                    let display_name = match self.display_type {
+                        DisplayType::DisplayName => get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp),
+                        DisplayType::FileName => get_file_name(&save.save_name, save.j2000_timestamp),
+                    };
+                    let selectable_costume_item = if self.show_images_in_selection_list {
+                        // FIXME if there are many images to display, the initial load hangs the
+                        // entire program!
+                        egui_extras::install_image_loaders(ctx);
+                        let file = format!("file://{}", save_file_name.to_str().unwrap());
+                        // Create a selectable button that contains an image and some text beneath it.
+                        ui.scope_builder(
+                            egui::UiBuilder::new().sense(egui::Sense::click()),
+                            |ui| {
+                                let style = ui.style();
+                                let mut frame = egui::Frame::canvas(style)
+                                    // .stroke(egui::Stroke { width: 1.0, ..Default::default() })
+                                    .outer_margin(2.0)
+                                    .inner_margin(4.0);
+                                if is_selected {
+                                    frame = frame.fill(style.visuals.selection.bg_fill);
+                                } else {
+                                    frame = frame.fill(style.visuals.window_fill);
+                                }
+                                frame.show(ui, |ui| {
+                                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                                        let image_width = 150.0;
+                                        let image = egui::Image::new(file.as_str())
+                                            .maintain_aspect_ratio(true)
+                                            // TODO Is fitting to 100% original size then using
+                                            // max_width to force it to a desired size weird and
+                                            // inefficient?
+                                            .max_width(image_width)
+                                            .fit_to_original_size(100.0);
+                                        ui.add(image);
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.set_max_width(image_width);
+                                            let label_text = egui::RichText::new(display_name);
+                                            if is_selected {
+                                                ui.label(label_text.color(ui.style().visuals.selection.stroke.color));
+                                            } else {
+                                                ui.label(label_text.color(ui.style().visuals.text_color()));
+                                            }
+                                        });
+                                    });
+                                });
+                            }
+                        ).response
+                    } else {
+                        ui.selectable_label(is_selected, display_name)
+                    };
+
+                    if selectable_costume_item.clicked() {
+                        self.selected_costume = Some(save_file_name.clone());
                         let save_name = save.save_name.clone();
                         let account_name = save.get_account_name().to_owned();
                         let character_name = save.get_character_name().to_owned();
