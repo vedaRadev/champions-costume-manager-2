@@ -106,6 +106,24 @@ const ACCOUNT_NAME_INDEX: usize = 0;
 const CHARACTER_NAME_INDEX: usize = 1;
 const COSTUME_HASH_INDEX: usize = 2;
 
+#[derive(Debug)]
+enum CostumeParseError {
+    InvalidFileName,
+}
+
+impl std::error::Error for CostumeParseError {}
+
+impl std::fmt::Display for CostumeParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Self::InvalidFileName => write!(
+                f,
+                "Invalid file name"
+            ),
+        }
+    }
+}
+
 // TODO list:
 // * Caching of in-game display names, only recalc when changed to improve GUI perf.
 // * Maybe caching of file name as well (currently requires dynamic creation of string)?
@@ -132,15 +150,16 @@ impl CostumeSaveFile {
     // - resource id is 0x0404
     // - resource name is "\0\0" 
     fn new_from_path(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let jpeg_raw = fs::read(path)?;
-        let costume_jpeg = Jpeg::parse(jpeg_raw)?;
         let file_stem = path
             .file_stem().unwrap()
             .to_str().unwrap();
+        if !file_stem.starts_with("Costume_") { return Err(Box::new(CostumeParseError::InvalidFileName)); }
         let j2000_timestamp = file_stem
             .split('_')
             .last().unwrap()
             .parse::<i64>().ok();
+        let jpeg_raw = fs::read(path)?;
+        let costume_jpeg = Jpeg::parse(jpeg_raw)?;
         let save_name = {
             let save_name_start = file_stem.find("_").unwrap();
             let save_name_end = if j2000_timestamp.is_some() { file_stem.rfind("_").unwrap() } else { file_stem.len() };
