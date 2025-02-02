@@ -244,7 +244,8 @@ impl CostumeSaveFile {
 }
 
 enum UiMessage {
-    FileListChanged,
+    /// We have detected that the file system has changed underneath us in some way.
+    FileListChangedExternally,
     FileRenamed { old: OsString, new: OsString },
 }
 
@@ -358,7 +359,7 @@ impl eframe::App for App {
 
         while let Ok(notification) = self.ui_message_rx.try_recv() {
             match notification {
-                UiMessage::FileListChanged => {
+                UiMessage::FileListChangedExternally => {
                     // The file the user was viewing was removed or renamed
                     if self.selected_costume.as_ref().is_some_and(|v| !saves.contains_key(v)) {
                         self.selected_costume = None;
@@ -703,7 +704,7 @@ fn main() {
                             for missing_file in missing_files {
                                 saves.remove(&missing_file);
                             }
-                            _ = ui_message_tx.send(UiMessage::FileListChanged);
+                            _ = ui_message_tx.send(UiMessage::FileListChangedExternally);
                             frame.request_repaint();
                         }
                         thread::sleep(Duration::from_millis(1000));
