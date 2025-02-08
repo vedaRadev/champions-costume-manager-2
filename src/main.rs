@@ -611,96 +611,157 @@ impl eframe::App for App {
             });
             ui.separator();
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                for save_file_name in self.sorted_saves.iter() {
-                    let save = &saves[save_file_name];
-                    let is_selected = self.selected_costume.as_ref().is_some_and(|v| v == save_file_name);
-                    let display_name = match self.display_type {
-                        DisplayType::DisplayName => get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp),
-                        DisplayType::FileName => get_file_name(&save.save_name, save.j2000_timestamp),
-                    };
-                    let selectable_costume_item = if self.show_images_in_selection_list {
-                        // FIXME if there are many images to display, the initial load hangs the
-                        // entire program!
-                        egui_extras::install_image_loaders(ctx);
-                        let file = format!("file://{}", save_file_name.to_str().unwrap());
-                        // Create a selectable button that contains an image and some text beneath it.
-                        ui.scope_builder(
-                            egui::UiBuilder::new().sense(egui::Sense::click()),
-                            |ui| {
-                                let style = ui.style();
-                                let mut frame = egui::Frame::canvas(style)
-                                    // .stroke(egui::Stroke { width: 1.0, ..Default::default() })
-                                    .outer_margin(2.0)
-                                    .inner_margin(4.0);
-                                if is_selected {
-                                    frame = frame.fill(style.visuals.selection.bg_fill);
-                                } else {
-                                    frame = frame.fill(style.visuals.window_fill);
-                                }
-                                frame.show(ui, |ui| {
-                                    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                                        let image_width = 150.0;
-                                        let image = egui::Image::new(file.as_str())
-                                            .maintain_aspect_ratio(true)
-                                            // TODO Is fitting to 100% original size then using
-                                            // max_width to force it to a desired size weird and
-                                            // inefficient?
-                                            .max_width(image_width)
-                                            .fit_to_original_size(100.0);
-                                        ui.add(image);
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.set_max_width(image_width);
-                                            let label_text = egui::RichText::new(display_name);
-                                            if is_selected {
-                                                ui.label(label_text.color(ui.style().visuals.selection.stroke.color));
-                                            } else {
-                                                ui.label(label_text.color(ui.style().visuals.text_color()));
-                                            }
+            if self.show_images_in_selection_list {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal_wrapped(|ui| {
+                        const IMAGE_ASPECT_RATIO: f32 = 3.0 / 4.0;
+                        const IMAGE_WIDTH: f32 = 150.0;
+                        const IMAGE_HEIGHT: f32 = IMAGE_WIDTH / IMAGE_ASPECT_RATIO;
+                        const IMAGE_SIZE: [f32; 2] = [IMAGE_WIDTH, IMAGE_HEIGHT];
+                        const LABEL_HEIGHT: f32 = 30.0;
+                        const FRAME_INTERNAL_SPACING_X: f32 = 0.0;
+                        const FRAME_INTERNAL_SPACING_Y: f32 = 0.0;
+                        const FRAME_INNER_MARGIN: f32 = 4.0;
+                        const FRAME_MIN_HEIGHT: f32 = IMAGE_HEIGHT + FRAME_INTERNAL_SPACING_Y + LABEL_HEIGHT + FRAME_INNER_MARGIN;
+                        const ITEM_SPACING_X: f32 = 0.0;
+                        const ITEM_SPACING_Y: f32 = 0.0;
+                        
+                        // TODO Figure out why vertical spacing gets all fucked up when ITEM_SPACING_Y > 0
+                        ui.spacing_mut().item_spacing = [ITEM_SPACING_X, ITEM_SPACING_Y].into();
+                        for save_file_name in self.sorted_saves.iter() {
+                            let save = &saves[save_file_name];
+                            let is_selected = self.selected_costume.as_ref().is_some_and(|v| v == save_file_name);
+                            let display_name = match self.display_type {
+                                DisplayType::DisplayName => get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp),
+                                DisplayType::FileName => get_file_name(&save.save_name, save.j2000_timestamp),
+                            };
+                            let selectable_costume_item = {
+                                // FIXME if there are many images to display, the initial load hangs the
+                                // entire program!
+                                egui_extras::install_image_loaders(ctx);
+                                let file = format!("file://{}", save_file_name.to_str().unwrap());
+                                // Create a selectable button that contains an image and some text beneath it.
+                                ui.scope_builder(
+                                    egui::UiBuilder::new().sense(egui::Sense::click()),
+                                    |ui| {
+                                        let style = ui.style();
+                                        let mut frame = egui::Frame::canvas(style)
+                                            // .stroke(egui::Stroke { width: 1.0, ..Default::default() })
+                                            .inner_margin(FRAME_INNER_MARGIN);
+                                        if is_selected {
+                                            frame = frame.fill(style.visuals.selection.bg_fill);
+                                        } else {
+                                            frame = frame.fill(style.visuals.window_fill);
+                                        }
+                                        frame.show(ui, |ui| {
+                                            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                                                ui.spacing_mut().item_spacing = [FRAME_INTERNAL_SPACING_X, FRAME_INTERNAL_SPACING_Y].into();
+                                                ui.set_height(FRAME_MIN_HEIGHT);
+                                                let image = egui::Image::new(file.as_str()).fit_to_exact_size(IMAGE_SIZE.into());
+                                                ui.add(image);
+                                                ui.horizontal_wrapped(|ui| {
+                                                    ui.set_max_width(IMAGE_WIDTH);
+                                                    let label_text = egui::RichText::new(display_name).color(
+                                                        if is_selected {
+                                                            ui.style().visuals.selection.stroke.color
+                                                        } else {
+                                                            ui.style().visuals.text_color()
+                                                        }
+                                                    );
+                                                    ui.add(egui::Label::new(label_text));
+                                                });
+                                            });
                                         });
+                                    }
+                                ).response
+                            };
+
+                            if ui.cursor().min.x + selectable_costume_item.rect.width() > ui.available_width() {
+                                ui.end_row();
+                            }
+
+                            if selectable_costume_item.clicked() {
+                                self.selected_costume = Some(save_file_name.clone());
+                                let save_name = save.save_name.clone();
+                                let account_name = save.get_account_name().to_owned();
+                                let character_name = save.get_character_name().to_owned();
+                                let timestamp = save.j2000_timestamp;
+                                let simple_name = format!("{}{}", account_name, character_name);
+                                let costume_spec = save.get_costume_spec().to_owned();
+                                let costume_hash = save.get_costume_hash().to_owned();
+
+                                if let Some(costume_edit) = self.costume_edit.as_mut() {
+                                    costume_edit.save_name = save_name;
+                                    costume_edit.simple_name = simple_name;
+                                    costume_edit.account_name = account_name;
+                                    costume_edit.character_name = character_name;
+                                    costume_edit.timestamp = timestamp;
+                                    costume_edit.strip_timestamp = false;
+                                    costume_edit.costume_spec = costume_spec;
+                                    costume_edit.costume_hash = costume_hash;
+                                } else {
+                                    self.costume_edit = Some(CostumeEdit {
+                                        simple_name,
+                                        save_name,
+                                        account_name,
+                                        character_name,
+                                        timestamp,
+                                        costume_spec,
+                                        costume_hash,
+                                        ..Default::default()
                                     });
+                                }
+                            }
+                        }
+                    });
+                });
+            } else {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    for save_file_name in self.sorted_saves.iter() {
+                        let save = &saves[save_file_name];
+                        let is_selected = self.selected_costume.as_ref().is_some_and(|v| v == save_file_name);
+                        let display_name = match self.display_type {
+                            DisplayType::DisplayName => get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp),
+                            DisplayType::FileName => get_file_name(&save.save_name, save.j2000_timestamp),
+                        };
+                        let selectable_costume_item = ui.selectable_label(is_selected, display_name);
+                        if selectable_costume_item.clicked() {
+                            self.selected_costume = Some(save_file_name.clone());
+                            let save_name = save.save_name.clone();
+                            let account_name = save.get_account_name().to_owned();
+                            let character_name = save.get_character_name().to_owned();
+                            let timestamp = save.j2000_timestamp;
+                            let simple_name = format!("{}{}", account_name, character_name);
+                            let costume_spec = save.get_costume_spec().to_owned();
+                            let costume_hash = save.get_costume_hash().to_owned();
+
+                            if let Some(costume_edit) = self.costume_edit.as_mut() {
+                                costume_edit.save_name = save_name;
+                                costume_edit.simple_name = simple_name;
+                                costume_edit.account_name = account_name;
+                                costume_edit.character_name = character_name;
+                                costume_edit.timestamp = timestamp;
+                                costume_edit.strip_timestamp = false;
+                                costume_edit.costume_spec = costume_spec;
+                                costume_edit.costume_hash = costume_hash;
+                            } else {
+                                self.costume_edit = Some(CostumeEdit {
+                                    simple_name,
+                                    save_name,
+                                    account_name,
+                                    character_name,
+                                    timestamp,
+                                    costume_spec,
+                                    costume_hash,
+                                    ..Default::default()
                                 });
                             }
-                        ).response
-                    } else {
-                        ui.selectable_label(is_selected, display_name)
-                    };
-
-                    if selectable_costume_item.clicked() {
-                        self.selected_costume = Some(save_file_name.clone());
-                        let save_name = save.save_name.clone();
-                        let account_name = save.get_account_name().to_owned();
-                        let character_name = save.get_character_name().to_owned();
-                        let timestamp = save.j2000_timestamp;
-                        let simple_name = format!("{}{}", account_name, character_name);
-                        let costume_spec = save.get_costume_spec().to_owned();
-                        let costume_hash = save.get_costume_hash().to_owned();
-
-                        if let Some(costume_edit) = self.costume_edit.as_mut() {
-                            costume_edit.save_name = save_name;
-                            costume_edit.simple_name = simple_name;
-                            costume_edit.account_name = account_name;
-                            costume_edit.character_name = character_name;
-                            costume_edit.timestamp = timestamp;
-                            costume_edit.strip_timestamp = false;
-                            costume_edit.costume_spec = costume_spec;
-                            costume_edit.costume_hash = costume_hash;
-                        } else {
-                            self.costume_edit = Some(CostumeEdit {
-                                simple_name,
-                                save_name,
-                                account_name,
-                                character_name,
-                                timestamp,
-                                costume_spec,
-                                costume_hash,
-                                ..Default::default()
-                            });
                         }
                     }
-                }
-            });
+                });
+            }
         });
 
     }
