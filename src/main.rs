@@ -612,6 +612,7 @@ impl eframe::App for App {
             ui.separator();
 
             egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
                 for save_file_name in self.sorted_saves.iter() {
                     let save = &saves[save_file_name];
                     let is_selected = self.selected_costume.as_ref().is_some_and(|v| v == save_file_name);
