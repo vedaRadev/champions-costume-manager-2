@@ -610,8 +610,10 @@ impl eframe::App for App {
             });
             ui.separator();
 
-            if self.show_images_in_selection_list {
-                egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                let available_width = ui.available_width();
+                ui.set_width(available_width);
+                if self.show_images_in_selection_list {
                     const IMAGE_ASPECT_RATIO: f32 = 3.0 / 4.0;
                     const IMAGE_WIDTH: f32 = 150.0;
                     const IMAGE_HEIGHT: f32 = IMAGE_WIDTH / IMAGE_ASPECT_RATIO;
@@ -625,14 +627,8 @@ impl eframe::App for App {
                     };
                     const ITEM_SPACING: egui::Vec2 = egui::Vec2 { x: 4.0, y: 4.0 };
 
-                    let available_width = ui.available_width();
-                    ui.set_width(available_width);
                     let num_cols = (available_width / (FRAME_SIZE.x + (FRAME_INNER_MARGIN * 2.0) + ITEM_SPACING.x)).floor() as usize;
-
-                    let grid  = egui::Grid::new("selection_grid")
-                        .spacing(ITEM_SPACING)
-                        .num_columns(num_cols);
-
+                    let grid  = egui::Grid::new("selection_grid").spacing(ITEM_SPACING).num_columns(num_cols);
                     grid.show(ui, |ui| {
                         for (idx, save_file_name) in self.sorted_saves.iter().enumerate() {
                             let save = &saves[save_file_name];
@@ -725,10 +721,7 @@ impl eframe::App for App {
                             }
                         }
                     });
-                });
-            } else {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
+                } else {
                     for save_file_name in self.sorted_saves.iter() {
                         let save = &saves[save_file_name];
                         let is_selected = self.selected_costume.as_ref().is_some_and(|v| v == save_file_name);
@@ -770,8 +763,8 @@ impl eframe::App for App {
                             }
                         }
                     }
-                });
-            }
+                }
+            });
         });
 
     }
