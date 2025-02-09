@@ -1,5 +1,8 @@
 // TODO Once this is in a more stable state and prototyping is finished, run through and figure out
 // how to reduce the amount of cloning we're doing.
+// FIXME I'm not sure if the images currently loaded by egui are ever freed, even when the
+// underlying files they were loaded from are removed from the file system and stop being tracked
+// by the application.
 
 mod jpeg;
 
