@@ -613,123 +613,90 @@ impl eframe::App for App {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let available_width = ui.available_width();
                 ui.set_width(available_width);
-                if self.show_images_in_selection_list {
-                    const IMAGE_ASPECT_RATIO: f32 = 3.0 / 4.0;
-                    const IMAGE_WIDTH: f32 = 150.0;
-                    const IMAGE_HEIGHT: f32 = IMAGE_WIDTH / IMAGE_ASPECT_RATIO;
-                    const IMAGE_SIZE: [f32; 2] = [IMAGE_WIDTH, IMAGE_HEIGHT];
-                    const LABEL_HEIGHT: f32 = 30.0;
-                    const FRAME_INNER_MARGIN: f32 = 4.0;
-                    /// Excludes the inner and outer margins of the frame and the inner widget spacing
-                    const FRAME_SIZE: egui::Vec2 = egui::Vec2 {
-                        x: IMAGE_WIDTH,
-                        y: IMAGE_HEIGHT + LABEL_HEIGHT,
-                    };
-                    const ITEM_SPACING: egui::Vec2 = egui::Vec2 { x: 4.0, y: 4.0 };
+                const IMAGE_ASPECT_RATIO: f32 = 3.0 / 4.0;
+                const IMAGE_WIDTH: f32 = 150.0;
+                const IMAGE_HEIGHT: f32 = IMAGE_WIDTH / IMAGE_ASPECT_RATIO;
+                const IMAGE_SIZE: [f32; 2] = [IMAGE_WIDTH, IMAGE_HEIGHT];
+                const LABEL_HEIGHT: f32 = 30.0;
+                const FRAME_INNER_MARGIN: f32 = 4.0;
+                /// Excludes the inner and outer margins of the frame and the inner widget spacing
+                const FRAME_SIZE: egui::Vec2 = egui::Vec2 {
+                    x: IMAGE_WIDTH,
+                    y: IMAGE_HEIGHT + LABEL_HEIGHT,
+                };
+                const ITEM_SPACING: egui::Vec2 = egui::Vec2 { x: 4.0, y: 4.0 };
 
-                    let num_cols = (available_width / (FRAME_SIZE.x + (FRAME_INNER_MARGIN * 2.0) + ITEM_SPACING.x)).floor() as usize;
-                    let grid  = egui::Grid::new("selection_grid").spacing(ITEM_SPACING).num_columns(num_cols);
-                    grid.show(ui, |ui| {
-                        for (idx, save_file_name) in self.sorted_saves.iter().enumerate() {
-                            let save = &saves[save_file_name];
-                            let is_selected = self.selected_costume.as_ref().is_some_and(|v| v == save_file_name);
-                            let display_name = match self.display_type {
-                                DisplayType::DisplayName => get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp),
-                                DisplayType::FileName => get_file_name(&save.save_name, save.j2000_timestamp),
-                            };
-
-                            let selectable_costume_item = {
-                                // FIXME if there are many images to display, the initial load hangs the
-                                // entire program!
-                                let file = format!("file://{}", save_file_name.to_str().unwrap());
-                                // Create a selectable button that contains an image and some text beneath it.
-                                ui.scope_builder(
-                                    egui::UiBuilder::new().sense(egui::Sense::click() | egui::Sense::hover()),
-                                    |ui| {
-                                        let frame = egui::Frame::canvas(ui.style())
-                                            .stroke(egui::Stroke::NONE)
-                                            .fill(ui.style().visuals.window_fill)
-                                            .inner_margin(FRAME_INNER_MARGIN);
-
-                                        let mut prepped = frame.begin(ui);
-
-                                        let is_hovered = prepped.content_ui.response().hovered();
-                                        if is_hovered {
-                                            prepped.frame = prepped.frame.stroke(egui::Stroke::new(2.0, prepped.content_ui.style().visuals.widgets.hovered.bg_stroke.color));
-                                            prepped.frame = prepped.frame.fill(prepped.content_ui.style().visuals.widgets.hovered.bg_fill);
-                                        }
-                                        if is_selected {
-                                            prepped.frame = prepped.frame.fill(prepped.content_ui.style().visuals.selection.bg_fill);
-                                        }
-
-                                        prepped.content_ui.set_max_width(FRAME_SIZE.x);
-                                        prepped.content_ui.set_min_size(FRAME_SIZE);
-                                        prepped.content_ui.vertical(|ui| {
-                                            ui.add(egui::Image::new(file.as_str()).fit_to_exact_size(IMAGE_SIZE.into()));
-                                            ui.horizontal_wrapped(|ui| {
-                                                let mut label_text = egui::RichText::new(display_name);
-                                                if is_hovered {
-                                                    label_text = label_text.color(ui.style().visuals.widgets.hovered.text_color());
-                                                }
-                                                if is_selected {
-                                                    label_text = label_text.color(ui.style().visuals.selection.stroke.color);
-                                                }
-                                                ui.add(egui::Label::new(label_text).selectable(false));
-                                            });
-                                        });
-
-                                        prepped.end(ui);
-                                    }
-                                ).response
-                            };
-
-                            if ((idx + 1) % num_cols) == 0 {
-                                ui.end_row();
-                            }
-
-                            if selectable_costume_item.clicked() {
-                                self.selected_costume = Some(save_file_name.clone());
-                                let save_name = save.save_name.clone();
-                                let account_name = save.get_account_name().to_owned();
-                                let character_name = save.get_character_name().to_owned();
-                                let timestamp = save.j2000_timestamp;
-                                let simple_name = format!("{}{}", account_name, character_name);
-                                let costume_spec = save.get_costume_spec().to_owned();
-                                let costume_hash = save.get_costume_hash().to_owned();
-
-                                if let Some(costume_edit) = self.costume_edit.as_mut() {
-                                    costume_edit.save_name = save_name;
-                                    costume_edit.simple_name = simple_name;
-                                    costume_edit.account_name = account_name;
-                                    costume_edit.character_name = character_name;
-                                    costume_edit.timestamp = timestamp;
-                                    costume_edit.strip_timestamp = false;
-                                    costume_edit.costume_spec = costume_spec;
-                                    costume_edit.costume_hash = costume_hash;
-                                } else {
-                                    self.costume_edit = Some(CostumeEdit {
-                                        simple_name,
-                                        save_name,
-                                        account_name,
-                                        character_name,
-                                        timestamp,
-                                        costume_spec,
-                                        costume_hash,
-                                        ..Default::default()
-                                    });
-                                }
-                            }
-                        }
-                    });
+                let num_cols = if self.show_images_in_selection_list {
+                    (available_width / (FRAME_SIZE.x + (FRAME_INNER_MARGIN * 2.0) + ITEM_SPACING.x)).floor() as usize
                 } else {
-                    for save_file_name in self.sorted_saves.iter() {
+                    1
+                };
+
+                let grid = egui::Grid::new("selection_grid").spacing(ITEM_SPACING);
+                grid.show(ui, |ui| {
+                    for (idx, save_file_name) in self.sorted_saves.iter().enumerate() {
                         let save = &saves[save_file_name];
                         let is_selected = self.selected_costume.as_ref().is_some_and(|v| v == save_file_name);
                         let display_name = match self.display_type {
                             DisplayType::DisplayName => get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp),
                             DisplayType::FileName => get_file_name(&save.save_name, save.j2000_timestamp),
                         };
-                        let selectable_costume_item = ui.selectable_label(is_selected, display_name);
+
+                        let selectable_costume_item = if self.show_images_in_selection_list {
+                            // FIXME if there are many images to display, the initial load hangs the
+                            // entire program!
+                            let file = format!("file://{}", save_file_name.to_str().unwrap());
+                            // Create a selectable button that contains an image and some text beneath it.
+                            let custom_button = ui.scope_builder(
+                                egui::UiBuilder::new().sense(egui::Sense::click() | egui::Sense::hover()),
+                                |ui| {
+                                    let frame = egui::Frame::canvas(ui.style())
+                                        .stroke(egui::Stroke::NONE)
+                                        .fill(ui.style().visuals.window_fill)
+                                        .inner_margin(FRAME_INNER_MARGIN);
+
+                                    let mut prepped = frame.begin(ui);
+
+                                    let is_hovered = prepped.content_ui.response().hovered();
+                                    if is_hovered {
+                                        prepped.frame = prepped.frame.stroke(egui::Stroke::new(2.0, prepped.content_ui.style().visuals.widgets.hovered.bg_stroke.color));
+                                        prepped.frame = prepped.frame.fill(prepped.content_ui.style().visuals.widgets.hovered.bg_fill);
+                                    }
+                                    if is_selected {
+                                        prepped.frame = prepped.frame.fill(prepped.content_ui.style().visuals.selection.bg_fill);
+                                    }
+
+                                    prepped.content_ui.set_max_width(FRAME_SIZE.x);
+                                    prepped.content_ui.set_min_size(FRAME_SIZE);
+                                    prepped.content_ui.vertical(|ui| {
+                                        ui.add(egui::Image::new(file.as_str()).fit_to_exact_size(IMAGE_SIZE.into()));
+                                        ui.horizontal_wrapped(|ui| {
+                                            let mut label_text = egui::RichText::new(display_name);
+                                            if is_hovered {
+                                                label_text = label_text.color(ui.style().visuals.widgets.hovered.text_color());
+                                            }
+                                            if is_selected {
+                                                label_text = label_text.color(ui.style().visuals.selection.stroke.color);
+                                            }
+                                            ui.add(egui::Label::new(label_text).selectable(false));
+                                        });
+                                    });
+
+                                    prepped.end(ui);
+                                }
+                            ).response;
+
+                            if ((idx + 1) % num_cols) == 0 {
+                                ui.end_row();
+                            }
+
+                            custom_button
+                        } else {
+                            let selectable_label = ui.selectable_label(is_selected, display_name);
+                            ui.end_row();
+                            selectable_label
+                        };
+
                         if selectable_costume_item.clicked() {
                             self.selected_costume = Some(save_file_name.clone());
                             let save_name = save.save_name.clone();
@@ -763,10 +730,9 @@ impl eframe::App for App {
                             }
                         }
                     }
-                }
+                });
             });
         });
-
     }
 }
 
