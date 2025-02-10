@@ -405,7 +405,7 @@ impl eframe::App for App {
                 ui.label("Spec changes will be saved upon closing this modal and saving the costume.");
                 ui.label("If the edit type is \"Simple\", costume spec changes will not be saved.");
                 ui.separator();
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                ui.horizontal(|ui| {
                     ui.label("Hash:");
                     ui.label(&self.costume_edit.as_ref().unwrap().costume_hash);
                 });
@@ -424,7 +424,7 @@ impl eframe::App for App {
                     }
                 });
 
-                ui.with_layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight), |ui| {
+                ui.centered_and_justified(|ui| {
                     if ui.button("Close").clicked() {
                         self.costume_spec_edit_open = false;
                     }
@@ -448,12 +448,12 @@ impl eframe::App for App {
 
                 // FIXME we probably do not want to construct the file name every frame. Maybe
                 // cache it in the CostumeEdit struct itself?
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                ui.horizontal(|ui| {
                     ui.label("File Name:");
                     ui.label(get_file_name(&costume_edit.save_name, costume_edit.timestamp));
                 });
                 // FIXME again, don't want to construct this every frame
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                ui.horizontal(|ui| {
                     ui.label("In-Game Display:");
                     ui.label(match costume_edit.edit_type {
                         CostumeEditType::Simple => get_in_game_display_name(&costume_edit.simple_name, "", costume_edit.timestamp),
@@ -463,13 +463,13 @@ impl eframe::App for App {
 
                 ui.separator();
 
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                ui.horizontal(|ui| {
                     ui.label("Edit Type:");
                     ui.selectable_value(&mut costume_edit.edit_type, CostumeEditType::Simple, "Simple");
                     ui.selectable_value(&mut costume_edit.edit_type, CostumeEditType::Advanced, "Advanced");
                 });
 
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                ui.horizontal(|ui| {
                     ui.label("Save Name:");
                     ui.text_edit_singleline(&mut costume_edit.save_name);
                 });
@@ -483,16 +483,16 @@ impl eframe::App for App {
                 }
 
                 if costume_edit.edit_type == CostumeEditType::Simple {
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                    ui.horizontal(|ui| {
                         ui.label("Name (in-game):");
                         ui.text_edit_singleline(&mut costume_edit.simple_name);
                     });
                 } else {
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                    ui.horizontal(|ui| {
                         ui.label("Account Name:");
                         ui.text_edit_singleline(&mut costume_edit.account_name);
                     });
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                    ui.horizontal(|ui| {
                         ui.label("Character Name:");
                         ui.text_edit_singleline(&mut costume_edit.character_name);
                     });
@@ -593,7 +593,7 @@ impl eframe::App for App {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+            ui.horizontal(|ui| {
                 ui.label("Display:");
                 let display_name_button = ui.selectable_value(&mut self.display_type, DisplayType::DisplayName, "Display Name");
                 let file_name_button = ui.selectable_value(&mut self.display_type, DisplayType::FileName, "File Name");
@@ -602,7 +602,7 @@ impl eframe::App for App {
                 }
                 ui.checkbox(&mut self.show_images_in_selection_list, "Show Images");
             });
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+            ui.horizontal(|ui| {
                 ui.label("Sort:");
                 let name_button = ui.selectable_value(&mut self.sort_type, SortType::Name, "Name");
                 let creation_time_button = ui.selectable_value(&mut self.sort_type, SortType::CreationTime, "Creation Time");
