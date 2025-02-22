@@ -3,6 +3,14 @@
 // FIXME I'm not sure if the images currently loaded by egui are ever freed, even when the
 // underlying files they were loaded from are removed from the file system and stop being tracked
 // by the application.
+//
+// FIXME Change filename in UI --> click save --> file renamed --> other thread picks up change -->
+// FileListChangedExternally dispatched --> selected_costumes BTreeSet cleared --> user selection
+// is reset to nothing.
+// Cause: we update the filesystem but don't inform our other thread that we're the ones who did
+// it. Maybe every time we make changes to files from the UI we need to update some shared
+// LastModifiedTime (the LMT of the costumes dir is what the scanning thread uses to see if it's
+// changed externally).
 
 mod jpeg;
 
@@ -18,7 +26,7 @@ use jpeg::{
 use eframe::egui;
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, BTreeSet},
     io::prelude::*,
     ffi::OsString,
     path::Path,
@@ -288,7 +296,8 @@ struct App {
     show_images_in_selection_list: bool,
     costume_spec_edit_open: bool,
     sorted_saves: Vec<OsString>,
-    selected_costume: Option<OsString>,
+    /// Values are indices into self.sorted_saves.
+    selected_costumes: BTreeSet<usize>,
     display_type: DisplayType,
     sort_type: SortType,
     costume_edit: Option<CostumeEdit>,
@@ -312,7 +321,7 @@ impl App {
             show_images_in_selection_list: false,
             costume_spec_edit_open: false,
             sorted_saves: vec![],
-            selected_costume: None,
+            selected_costumes: BTreeSet::new(),
             display_type: DisplayType::DisplayName,
             sort_type: SortType::Name,
             costume_edit: None,
@@ -365,9 +374,11 @@ impl eframe::App for App {
         while let Ok(notification) = self.ui_message_rx.try_recv() {
             match notification {
                 UiMessage::FileListChangedExternally => {
-                    // The file the user was viewing was removed or renamed
-                    if self.selected_costume.as_ref().is_some_and(|v| !saves.contains_key(v)) {
-                        self.selected_costume = None;
+                    // The file(s) the user was viewing was removed or renamed
+                    if self.selected_costumes.len() == 1 && saves.contains_key(&self.sorted_saves[*self.selected_costumes.first().unwrap()])
+                    || self.selected_costumes.len() > 1
+                    {
+                        self.selected_costumes.clear();
                         self.costume_edit = None;
                     }
 
@@ -376,14 +387,26 @@ impl eframe::App for App {
                 },
 
                 UiMessage::FileRenamed { old, new } => {
-                    if self.selected_costume.as_ref().is_some_and(|v| *v == old) {
-                        self.selected_costume = Some(new.clone());
-                    }
+                    assert_eq!(
+                        self.selected_costumes.len(),
+                        1,
+                        "Received a FileRenamed event with 0 or multiple items selected. Do we need to account for those cases?"
+                    );
+
+                    // FIXME really lazy and inefficient. I don't think we can know where the new
+                    // save name will be after sorting (maybe we actually can) but we can probably
+                    // pass along the index of the old save with this event. Would eliminate an
+                    // entire scan through the sorted_saves array.
+                    let (old_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| **save == old).unwrap();
+                    assert!(self.selected_costumes.remove(&old_index));
 
                     let save = saves.remove(&old).unwrap();
-                    saves.insert(new, save);
+                    saves.insert(new.clone(), save);
                     self.sorted_saves = saves.keys().cloned().collect();
                     Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
+
+                    let (new_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| **save == new).unwrap();
+                    self.selected_costumes.insert(new_index);
                 }
             }
         }
@@ -436,7 +459,11 @@ impl eframe::App for App {
             // NOTE: For now we're just assuming that the selected costume and the costume edit
             // data are properly tied together. Maybe we should tie these together better so that
             // they can't possibly get out of sync.
-            if let Some(costume_file_name) = self.selected_costume.as_ref() {
+            // TODO delete the allowance of comparison change and follow clippy recommendation.
+            #[allow(clippy::comparison_chain)]
+            if self.selected_costumes.len() == 1 {
+                // FIXME probably ultimately unnecessary clone
+                let costume_file_name = &self.sorted_saves[*self.selected_costumes.first().unwrap()].clone();
                 let costume = saves.get(costume_file_name).unwrap();
                 let costume_edit = self.costume_edit.as_mut().unwrap();
 
@@ -581,12 +608,17 @@ impl eframe::App for App {
 
                 if ui.button("Delete").clicked() {
                     // TODO show confirmation popup before deleting
+                    // TODO should we dispatch an event and process deletion at the start of the
+                    // frame instead of doing it inline here?
                     fs::remove_file(costume_file_name).expect("Failed to delete file");
                     saves.remove(costume_file_name);
                     self.sorted_saves = saves.keys().cloned().collect();
                     Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
-                    self.selected_costume = None;
+                    self.selected_costumes.clear();
                 }
+            } else if self.selected_costumes.len() > 1 {
+                // TODO
+                ui.label("UI for multiple selected saves");
             } else {
                 ui.label("Select a save to view details");
             }
@@ -639,7 +671,7 @@ impl eframe::App for App {
                 grid.show(ui, |ui| {
                     for (idx, save_file_name) in self.sorted_saves.iter().enumerate() {
                         let save = &saves[save_file_name];
-                        let is_selected = self.selected_costume.as_ref().is_some_and(|v| v == save_file_name);
+                        let is_selected = self.selected_costumes.contains(&idx);
                         let display_name = match self.display_type {
                             DisplayType::DisplayName => get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp),
                             DisplayType::FileName => get_file_name(&save.save_name, save.j2000_timestamp),
@@ -701,7 +733,10 @@ impl eframe::App for App {
                         };
 
                         if selectable_costume_item.clicked() {
-                            self.selected_costume = Some(save_file_name.clone());
+                            // TODO get click type (regular click, shift+click, ctrl+click) and set
+                            // update selections accordingly.
+                            self.selected_costumes.clear();
+                            self.selected_costumes.insert(idx);
                             let save_name = save.save_name.clone();
                             let account_name = save.get_account_name().to_owned();
                             let character_name = save.get_character_name().to_owned();
