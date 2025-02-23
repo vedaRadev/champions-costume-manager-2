@@ -11,6 +11,8 @@
 // it. Maybe every time we make changes to files from the UI we need to update some shared
 // LastModifiedTime (the LMT of the costumes dir is what the scanning thread uses to see if it's
 // changed externally).
+//
+// AUDIT Should we use env::current_dir or share the costume dir across threads?
 
 mod jpeg;
 
@@ -607,6 +609,9 @@ impl eframe::App for App {
                             Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
                         }
 
+                        // TODO find a way to compress this code since we do the exact same thing when
+                        // deleting files.
+
                         // Signal to the scanning thread that we initiated the file system change.
                         // This avoids cases where we update the file system, react to the update,
                         // then the scanner sees that something was changed and gives us ANOTHER
@@ -627,6 +632,18 @@ impl eframe::App for App {
                     self.sorted_saves = saves.keys().cloned().collect();
                     Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
                     self.selected_costumes.clear();
+
+                    // TODO find a way to compress this code since we do the exact same thing when
+                    // saving files.
+
+                    // Signal to the scanning thread that we initiated the file system change.
+                    // This avoids cases where we update the file system, react to the update,
+                    // then the scanner sees that something was changed and gives us ANOTHER
+                    // notification that the file system was changed.
+                    let current_dir = env::current_dir().unwrap();
+                    let last_modified_time = fs::metadata(&current_dir).unwrap().modified().unwrap();
+                    // TODO log failure
+                    let _ = self.scanner_tx.send(last_modified_time);
                 }
             } else if self.selected_costumes.len() > 1 {
                 // TODO
@@ -821,6 +838,8 @@ fn main() {
                     loop {
                         let current_dir = env::current_dir().unwrap();
                         let modified_time = fs::metadata(&current_dir).unwrap().modified().unwrap();
+                        // If the UI initiated file system changes we need to know so that we don't
+                        // misidentify an external file system change.
                         while let Ok(ui_last_modified_time) = scanner_rx.try_recv() {
                             last_modified_time = Some(ui_last_modified_time);
                         }
