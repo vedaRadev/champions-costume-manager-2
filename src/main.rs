@@ -291,6 +291,7 @@ struct App {
     saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>>,
     ui_message_tx: mpsc::Sender<UiMessage>,
     ui_message_rx: mpsc::Receiver<UiMessage>,
+    scanner_tx: mpsc::Sender<SystemTime>,
 
     file_exists_warning_modal_open: bool,
     show_images_in_selection_list: bool,
@@ -310,12 +311,14 @@ impl App {
         saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>>,
         ui_message_tx: mpsc::Sender<UiMessage>,
         ui_message_rx: mpsc::Receiver<UiMessage>,
+        scanner_tx: mpsc::Sender<SystemTime>,
     ) -> Self
     {
         Self {
             saves,
             ui_message_tx,
             ui_message_rx,
+            scanner_tx,
 
             file_exists_warning_modal_open: false,
             show_images_in_selection_list: false,
@@ -603,6 +606,15 @@ impl eframe::App for App {
                             // TODO maybe also send this through the ui message system?
                             Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
                         }
+
+                        // Signal to the scanning thread that we initiated the file system change.
+                        // This avoids cases where we update the file system, react to the update,
+                        // then the scanner sees that something was changed and gives us ANOTHER
+                        // notification that the file system was changed.
+                        let current_dir = env::current_dir().unwrap();
+                        let last_modified_time = fs::metadata(&current_dir).unwrap().modified().unwrap();
+                        // TODO log failure
+                        let _ = self.scanner_tx.send(last_modified_time);
                     }
                 }
 
@@ -788,6 +800,9 @@ fn main() {
         options,
         Box::new(|cc| {
             let (ui_message_tx, ui_message_rx) = mpsc::channel::<UiMessage>();
+            // For the UI thread to communicate that it updated the filesystem so the scanner
+            // thread doesn't run unnecessarily.
+            let (scanner_tx, scanner_rx) = mpsc::channel::<SystemTime>();
 
             // TODO maybe store some struct that contains the last modified date of the file and the
             // costume save metadata? Then if the file was modified underneath us we can reload it.
@@ -804,12 +819,17 @@ fn main() {
                 thread::spawn(move || {
                     let mut last_modified_time: Option<SystemTime> = None;
                     loop {
-                        let modified_time = fs::metadata(&costume_dir).unwrap().modified().unwrap();
+                        let current_dir = env::current_dir().unwrap();
+                        let modified_time = fs::metadata(&current_dir).unwrap().modified().unwrap();
+                        while let Ok(ui_last_modified_time) = scanner_rx.try_recv() {
+                            last_modified_time = Some(ui_last_modified_time);
+                        }
+
                         if last_modified_time.is_none_or(|lmt| modified_time != lmt) {
                             last_modified_time = Some(modified_time);
                             let mut saves = saves.lock().unwrap();
                             let mut missing_files: HashSet<OsString> = HashSet::from_iter(saves.keys().cloned());
-                            for entry in fs::read_dir(&costume_dir).unwrap().flatten() {
+                            for entry in fs::read_dir(&current_dir).unwrap().flatten() {
                                 // TODO check that the file starts with Costume_ and is a jpeg file. If not,
                                 // continue. Should that logic be a part of CostumeSaveFile?
                                 let file_name = entry.file_name();
@@ -837,6 +857,7 @@ fn main() {
                 saves,
                 ui_message_tx,
                 ui_message_rx,
+                scanner_tx,
             )))
         })
     );
