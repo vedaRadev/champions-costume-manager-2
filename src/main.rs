@@ -779,7 +779,7 @@ impl eframe::App for App {
                                             self.selected_costumes.pop_last();
                                         }
                                         match idx.cmp(&lo) {
-                                            Ordering::Less => {
+                                            Ordering::Less | Ordering::Equal => {
                                                 for i in idx..=self.selection_range_pivot {
                                                     self.selected_costumes.insert(i);
                                                 }
@@ -789,7 +789,6 @@ impl eframe::App for App {
                                                     self.selected_costumes.pop_first();
                                                 }
                                             },
-                                            Ordering::Equal => {},
                                         }
                                     },
                                     Ordering::Greater => {
@@ -802,12 +801,11 @@ impl eframe::App for App {
                                                     self.selected_costumes.pop_last();
                                                 }
                                             },
-                                            Ordering::Greater => {
+                                            Ordering::Greater | Ordering::Equal => {
                                                 for i in self.selection_range_pivot..=idx {
                                                     self.selected_costumes.insert(i);
                                                 }
                                             },
-                                            Ordering::Equal => {},
                                         }
                                     },
                                     Ordering::Equal => {
