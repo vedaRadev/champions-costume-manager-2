@@ -28,6 +28,7 @@ use jpeg::{
 use eframe::egui;
 
 use std::{
+    cmp::Ordering,
     collections::{HashMap, HashSet, BTreeSet},
     io::prelude::*,
     ffi::OsString,
@@ -301,6 +302,7 @@ struct App {
     sorted_saves: Vec<OsString>,
     /// Values are indices into self.sorted_saves.
     selected_costumes: BTreeSet<usize>,
+    selection_range_pivot: usize,
     display_type: DisplayType,
     sort_type: SortType,
     costume_edit: Option<CostumeEdit>,
@@ -327,6 +329,7 @@ impl App {
             costume_spec_edit_open: false,
             sorted_saves: vec![],
             selected_costumes: BTreeSet::new(),
+            selection_range_pivot: 0,
             display_type: DisplayType::DisplayName,
             sort_type: SortType::Name,
             costume_edit: None,
@@ -375,6 +378,7 @@ impl eframe::App for App {
     // whenever the scanning thread detects that files were added/removed underneath the GUI.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut saves = self.saves.lock().unwrap();
+        let current_modifiers = ctx.input(|input| input.modifiers);
 
         while let Ok(notification) = self.ui_message_rx.try_recv() {
             match notification {
@@ -762,38 +766,99 @@ impl eframe::App for App {
                         };
 
                         if selectable_costume_item.clicked() {
-                            // TODO get click type (regular click, shift+click, ctrl+click) and set
-                            // update selections accordingly.
-                            self.selected_costumes.clear();
-                            self.selected_costumes.insert(idx);
-                            let save_name = save.save_name.clone();
-                            let account_name = save.get_account_name().to_owned();
-                            let character_name = save.get_character_name().to_owned();
-                            let timestamp = save.j2000_timestamp;
-                            let simple_name = format!("{}{}", account_name, character_name);
-                            let costume_spec = save.get_costume_spec().to_owned();
-                            let costume_hash = save.get_costume_hash().to_owned();
-
-                            if let Some(costume_edit) = self.costume_edit.as_mut() {
-                                costume_edit.save_name = save_name;
-                                costume_edit.simple_name = simple_name;
-                                costume_edit.account_name = account_name;
-                                costume_edit.character_name = character_name;
-                                costume_edit.timestamp = timestamp;
-                                costume_edit.strip_timestamp = false;
-                                costume_edit.costume_spec = costume_spec;
-                                costume_edit.costume_hash = costume_hash;
+                            // TODO see about simplifying this code
+                            if self.selected_costumes.is_empty() {
+                                self.selected_costumes.insert(idx);
+                                self.selection_range_pivot = idx;
+                            } else if current_modifiers.shift {
+                                let lo = *self.selected_costumes.first().unwrap();
+                                let hi = *self.selected_costumes.last().unwrap();
+                                match idx.cmp(&self.selection_range_pivot) {
+                                    Ordering::Less => {
+                                        while self.selected_costumes.last().is_some_and(|i| *i > self.selection_range_pivot) {
+                                            self.selected_costumes.pop_last();
+                                        }
+                                        match idx.cmp(&lo) {
+                                            Ordering::Less => {
+                                                for i in idx..=self.selection_range_pivot {
+                                                    self.selected_costumes.insert(i);
+                                                }
+                                            },
+                                            Ordering::Greater => {
+                                                while self.selected_costumes.first().is_some_and(|i| *i != idx) {
+                                                    self.selected_costumes.pop_first();
+                                                }
+                                            },
+                                            Ordering::Equal => {},
+                                        }
+                                    },
+                                    Ordering::Greater => {
+                                        while self.selected_costumes.first().is_some_and(|i| *i < self.selection_range_pivot) {
+                                            self.selected_costumes.pop_first();
+                                        }
+                                        match idx.cmp(&hi) {
+                                            Ordering::Less => {
+                                                while self.selected_costumes.last().is_some_and(|i| *i != idx) {
+                                                    self.selected_costumes.pop_last();
+                                                }
+                                            },
+                                            Ordering::Greater => {
+                                                for i in self.selection_range_pivot..=idx {
+                                                    self.selected_costumes.insert(i);
+                                                }
+                                            },
+                                            Ordering::Equal => {},
+                                        }
+                                    },
+                                    Ordering::Equal => {
+                                        self.selected_costumes.clear();
+                                        self.selected_costumes.insert(idx);
+                                    }
+                                }
+                            } else if current_modifiers.ctrl {
+                                self.selection_range_pivot = idx;
+                                if is_selected {
+                                    self.selected_costumes.remove(&idx);
+                                } else {
+                                    self.selected_costumes.insert(idx);
+                                }
                             } else {
-                                self.costume_edit = Some(CostumeEdit {
-                                    simple_name,
-                                    save_name,
-                                    account_name,
-                                    character_name,
-                                    timestamp,
-                                    costume_spec,
-                                    costume_hash,
-                                    ..Default::default()
-                                });
+                                self.selected_costumes.clear();
+                                self.selected_costumes.insert(idx);
+                                self.selection_range_pivot = idx;
+                            }
+
+                            if self.selected_costumes.len() == 1 && self.selected_costumes.contains(&idx) {
+                                assert_eq!(*self.selected_costumes.first().unwrap(), idx);
+                                let save_name = save.save_name.clone();
+                                let account_name = save.get_account_name().to_owned();
+                                let character_name = save.get_character_name().to_owned();
+                                let timestamp = save.j2000_timestamp;
+                                let simple_name = format!("{}{}", account_name, character_name);
+                                let costume_spec = save.get_costume_spec().to_owned();
+                                let costume_hash = save.get_costume_hash().to_owned();
+
+                                if let Some(costume_edit) = self.costume_edit.as_mut() {
+                                    costume_edit.save_name = save_name;
+                                    costume_edit.simple_name = simple_name;
+                                    costume_edit.account_name = account_name;
+                                    costume_edit.character_name = character_name;
+                                    costume_edit.timestamp = timestamp;
+                                    costume_edit.strip_timestamp = false;
+                                    costume_edit.costume_spec = costume_spec;
+                                    costume_edit.costume_hash = costume_hash;
+                                } else {
+                                    self.costume_edit = Some(CostumeEdit {
+                                        simple_name,
+                                        save_name,
+                                        account_name,
+                                        character_name,
+                                        timestamp,
+                                        costume_spec,
+                                        costume_hash,
+                                        ..Default::default()
+                                    });
+                                }
                             }
                         }
                     }
