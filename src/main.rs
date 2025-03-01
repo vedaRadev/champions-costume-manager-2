@@ -766,52 +766,26 @@ impl eframe::App for App {
                         };
 
                         if selectable_costume_item.clicked() {
-                            // TODO see about simplifying this code
                             if self.selected_costumes.is_empty() {
                                 self.selected_costumes.insert(idx);
                                 self.selection_range_pivot = idx;
                             } else if current_modifiers.shift {
-                                let lo = *self.selected_costumes.first().unwrap();
-                                let hi = *self.selected_costumes.last().unwrap();
-                                match idx.cmp(&self.selection_range_pivot) {
-                                    Ordering::Less => {
-                                        while self.selected_costumes.last().is_some_and(|i| *i > self.selection_range_pivot) {
-                                            self.selected_costumes.pop_last();
-                                        }
-                                        match idx.cmp(&lo) {
-                                            Ordering::Less | Ordering::Equal => {
-                                                for i in idx..=self.selection_range_pivot {
-                                                    self.selected_costumes.insert(i);
-                                                }
-                                            },
-                                            Ordering::Greater => {
-                                                while self.selected_costumes.first().is_some_and(|i| *i != idx) {
-                                                    self.selected_costumes.pop_first();
-                                                }
-                                            },
-                                        }
+                                // NOTE: If for some reason clearing the list and re-adding the
+                                // range every time causes performance issues, change this back to
+                                // the prior logic where we would check the lo/hi vals against the
+                                // pivot and only add/remove items that were outside the
+                                // already-selected range.
+                                self.selected_costumes.clear();
+                                match self.selection_range_pivot.cmp(&idx) {
+                                    Ordering::Greater => for i in idx ..= self.selection_range_pivot {
+                                        self.selected_costumes.insert(i);
                                     },
-                                    Ordering::Greater => {
-                                        while self.selected_costumes.first().is_some_and(|i| *i < self.selection_range_pivot) {
-                                            self.selected_costumes.pop_first();
-                                        }
-                                        match idx.cmp(&hi) {
-                                            Ordering::Less => {
-                                                while self.selected_costumes.last().is_some_and(|i| *i != idx) {
-                                                    self.selected_costumes.pop_last();
-                                                }
-                                            },
-                                            Ordering::Greater | Ordering::Equal => {
-                                                for i in self.selection_range_pivot..=idx {
-                                                    self.selected_costumes.insert(i);
-                                                }
-                                            },
-                                        }
+                                    Ordering::Less => for i in self.selection_range_pivot ..= idx {
+                                        self.selected_costumes.insert(i);
                                     },
                                     Ordering::Equal => {
-                                        self.selected_costumes.clear();
                                         self.selected_costumes.insert(idx);
-                                    }
+                                    },
                                 }
                             } else if current_modifiers.ctrl {
                                 self.selection_range_pivot = idx;
