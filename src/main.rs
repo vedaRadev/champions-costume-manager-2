@@ -4,14 +4,6 @@
 // underlying files they were loaded from are removed from the file system and stop being tracked
 // by the application.
 //
-// FIXME Change filename in UI --> click save --> file renamed --> other thread picks up change -->
-// FileListChangedExternally dispatched --> selected_costumes BTreeSet cleared --> user selection
-// is reset to nothing.
-// Cause: we update the filesystem but don't inform our other thread that we're the ones who did
-// it. Maybe every time we make changes to files from the UI we need to update some shared
-// LastModifiedTime (the LMT of the costumes dir is what the scanning thread uses to see if it's
-// changed externally).
-//
 // AUDIT Should we use env::current_dir or share the costume dir across threads?
 
 mod jpeg;
