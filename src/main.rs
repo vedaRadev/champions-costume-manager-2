@@ -29,7 +29,7 @@ use eframe::egui;
 
 use std::{
     cmp::Ordering,
-    collections::{HashMap, HashSet, BTreeSet},
+    collections::{HashMap, HashSet},
     io::prelude::*,
     ffi::OsString,
     path::Path,
@@ -301,7 +301,7 @@ struct App {
     costume_spec_edit_open: bool,
     sorted_saves: Vec<OsString>,
     /// Values are indices into self.sorted_saves.
-    selected_costumes: BTreeSet<usize>,
+    selected_costumes: HashSet<usize>,
     selection_range_pivot: usize,
     display_type: DisplayType,
     sort_type: SortType,
@@ -328,7 +328,7 @@ impl App {
             show_images_in_selection_list: false,
             costume_spec_edit_open: false,
             sorted_saves: vec![],
-            selected_costumes: BTreeSet::new(),
+            selected_costumes: HashSet::new(),
             selection_range_pivot: 0,
             display_type: DisplayType::DisplayName,
             sort_type: SortType::Name,
@@ -384,7 +384,7 @@ impl eframe::App for App {
             match notification {
                 UiMessage::FileListChangedExternally => {
                     // The file(s) the user was viewing was removed or renamed
-                    if self.selected_costumes.len() == 1 && saves.contains_key(&self.sorted_saves[*self.selected_costumes.first().unwrap()])
+                    if self.selected_costumes.len() == 1 && saves.contains_key(&self.sorted_saves[*self.selected_costumes.iter().last().unwrap()])
                     || self.selected_costumes.len() > 1
                     {
                         self.selected_costumes.clear();
@@ -472,7 +472,7 @@ impl eframe::App for App {
             #[allow(clippy::comparison_chain)]
             if self.selected_costumes.len() == 1 {
                 // FIXME probably ultimately unnecessary clone
-                let costume_file_name = &self.sorted_saves[*self.selected_costumes.first().unwrap()].clone();
+                let costume_file_name = &self.sorted_saves[*self.selected_costumes.iter().last().unwrap()].clone();
                 let costume = saves.get(costume_file_name).unwrap();
                 let costume_edit = self.costume_edit.as_mut().unwrap();
 
@@ -774,7 +774,7 @@ impl eframe::App for App {
                                 // range every time causes performance issues, change this back to
                                 // the prior logic where we would check the lo/hi vals against the
                                 // pivot and only add/remove items that were outside the
-                                // already-selected range.
+                                // already-selected range (may need to switch back to BTreeSet).
                                 self.selected_costumes.clear();
                                 match self.selection_range_pivot.cmp(&idx) {
                                     Ordering::Greater => for i in idx ..= self.selection_range_pivot {
@@ -801,7 +801,7 @@ impl eframe::App for App {
                             }
 
                             if self.selected_costumes.len() == 1 && self.selected_costumes.contains(&idx) {
-                                assert_eq!(*self.selected_costumes.first().unwrap(), idx);
+                                assert_eq!(*self.selected_costumes.iter().last().unwrap(), idx);
                                 let save_name = save.save_name.clone();
                                 let account_name = save.get_account_name().to_owned();
                                 let character_name = save.get_character_name().to_owned();
