@@ -642,8 +642,29 @@ impl eframe::App for App {
                     let _ = self.scanner_tx.send(last_modified_time);
                 }
             } else if self.selected_costumes.len() > 1 {
-                // TODO
-                ui.label("UI for multiple selected saves");
+                ui.label(format!("{} selected items", self.selected_costumes.len()));
+                if ui.button("Delete").clicked() {
+                    // TODO show delete confirmation popup
+                    for selected_idx in self.selected_costumes.iter() {
+                        let costume_file_name = &self.sorted_saves[*selected_idx];
+                        fs::remove_file(costume_file_name).expect("Failed to delete file");
+                        saves.remove(costume_file_name);
+                    }
+                    self.sorted_saves = saves.keys().cloned().collect();
+                    Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
+                    self.selected_costumes.clear();
+                    // TODO find a way to compress this code since we do the exact same thing when
+                    // saving files.
+
+                    // Signal to the scanning thread that we initiated the file system change.
+                    // This avoids cases where we update the file system, react to the update,
+                    // then the scanner sees that something was changed and gives us ANOTHER
+                    // notification that the file system was changed.
+                    let current_dir = env::current_dir().unwrap();
+                    let last_modified_time = fs::metadata(&current_dir).unwrap().modified().unwrap();
+                    // TODO log failure
+                    let _ = self.scanner_tx.send(last_modified_time);
+                }
             } else {
                 ui.label("Select a save to view details");
             }
