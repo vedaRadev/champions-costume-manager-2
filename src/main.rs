@@ -518,6 +518,9 @@ impl eframe::App for App {
                         }
                     }
 
+                    // TODO no-op if nothing was changed (maybe disable button?)
+                    // TODO only reserialize data if costume edit fields were changed (i.e.
+                    // optimize for case where only the file name was changed).
                     // TODO If the user is not on windows, maybe we need to change how we're saving
                     // things. Instead of writing a new file then deleting the old and attempting to
                     // update the file creation times, maybe we should just overwrite the old so that
