@@ -1,5 +1,11 @@
 // TODO Once this is in a more stable state and prototyping is finished, run through and figure out
 // how to reduce the amount of cloning we're doing.
+//
+// TODO Eventually refactor to compress UI actions (e.g. selected file save, delete, etc.). I think
+// we should wait until we're further along to actually implement this. If we abstract or DRY up
+// too early then when we want to go through and harden the app by adding things like logging on
+// filesystem interaction failure, it might just make implementing it more of a nightmare.
+//
 // FIXME I'm not sure if the images currently loaded by egui are ever freed, even when the
 // underlying files they were loaded from are removed from the file system and stop being tracked
 // by the application.
@@ -283,6 +289,8 @@ enum SortType { Name, CreationTime, ModifiedTime }
 // TODO maybe tie the selected costume and costume edit together so they can never get out of sync?
 struct App {
     saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>>,
+    // TODO remove. Doesn't seem like we really have a need for the UI thread to send thread-safe
+    // UI messages to itself.
     ui_message_tx: mpsc::Sender<UiMessage>,
     ui_message_rx: mpsc::Receiver<UiMessage>,
     scanner_tx: mpsc::Sender<SystemTime>,
@@ -438,200 +446,182 @@ impl eframe::App for App {
             // they can't possibly get out of sync.
             // TODO delete the allowance of comparison change and follow clippy recommendation.
             #[allow(clippy::comparison_chain)]
-            if self.selected_costumes.len() == 1 {
-                // FIXME probably ultimately unnecessary clone
-                let costume_file_name = &self.sorted_saves[*self.selected_costumes.iter().last().unwrap()].clone();
-                let costume = saves.get(costume_file_name).unwrap();
-                let costume_edit = self.costume_edit.as_mut().unwrap();
+            if self.selected_costumes.is_empty() {
+                ui.label("Select a save to view details");
+            } else {
+                if self.selected_costumes.len() > 1 {
+                    ui.label(format!("{} selected items", self.selected_costumes.len()));
+                } else if self.selected_costumes.len() == 1 {
+                    // FIXME probably ultimately unnecessary clone
+                    let costume_file_name = &self.sorted_saves[*self.selected_costumes.iter().last().unwrap()].clone();
+                    let costume = saves.get(costume_file_name).unwrap();
+                    let costume_edit = self.costume_edit.as_mut().unwrap();
 
-                let file = format!("file://{}", costume_file_name.to_str().unwrap());
-                let image = egui::Image::new(file.as_str())
-                    .maintain_aspect_ratio(true)
-                    .max_height(500.0);
-                ui.add(image);
+                    let file = format!("file://{}", costume_file_name.to_str().unwrap());
+                    let image = egui::Image::new(file.as_str())
+                        .maintain_aspect_ratio(true)
+                        .max_height(500.0);
+                    ui.add(image);
 
-                // FIXME we probably do not want to construct the file name every frame. Maybe
-                // cache it in the CostumeEdit struct itself?
-                ui.horizontal(|ui| {
-                    ui.label("File Name:");
-                    ui.label(get_file_name(&costume_edit.save_name, costume_edit.timestamp));
-                });
-                // FIXME again, don't want to construct this every frame
-                ui.horizontal(|ui| {
-                    ui.label("In-Game Display:");
-                    ui.label(match costume_edit.edit_type {
-                        CostumeEditType::Simple => get_in_game_display_name(&costume_edit.simple_name, "", costume_edit.timestamp),
-                        CostumeEditType::Advanced => get_in_game_display_name(&costume_edit.account_name, &costume_edit.character_name, costume_edit.timestamp),
-                    });
-                });
-
-                ui.separator();
-
-                ui.horizontal(|ui| {
-                    ui.label("Edit Type:");
-                    ui.selectable_value(&mut costume_edit.edit_type, CostumeEditType::Simple, "Simple");
-                    ui.selectable_value(&mut costume_edit.edit_type, CostumeEditType::Advanced, "Advanced");
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("Save Name:");
-                    ui.text_edit_singleline(&mut costume_edit.save_name);
-                });
-                if costume.j2000_timestamp.is_some() {
-                    ui.checkbox(&mut costume_edit.strip_timestamp, "Strip Timestamp");
-                    if costume_edit.strip_timestamp {
-                        costume_edit.timestamp = None;
-                    } else {
-                        costume_edit.timestamp = costume.j2000_timestamp;
-                    }
-                }
-
-                if costume_edit.edit_type == CostumeEditType::Simple {
+                    // FIXME we probably do not want to construct the file name every frame. Maybe
+                    // cache it in the CostumeEdit struct itself?
                     ui.horizontal(|ui| {
-                        ui.label("Name (in-game):");
-                        ui.text_edit_singleline(&mut costume_edit.simple_name);
+                        ui.label("File Name:");
+                        ui.label(get_file_name(&costume_edit.save_name, costume_edit.timestamp));
                     });
-                } else {
+                    // FIXME again, don't want to construct this every frame
                     ui.horizontal(|ui| {
-                        ui.label("Account Name:");
-                        ui.text_edit_singleline(&mut costume_edit.account_name);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Character Name:");
-                        ui.text_edit_singleline(&mut costume_edit.character_name);
-                    });
-                    if ui.button("Edit Spec").clicked() {
-                        self.costume_spec_edit_open = true;
-                    }
-                }
-
-                // TODO If the user is not on windows, maybe we need to change how we're saving
-                // things. Instead of writing a new file then deleting the old and attempting to
-                // update the file creation times, maybe we should just overwrite the old so that
-                // we keep the file creation time.
-                // FIXME Logging, not crashing!
-                if ui.button("Save").clicked() {
-                    let old_file_name = costume_file_name;
-                    let new_file_name = OsString::from(get_file_name(&costume_edit.save_name, costume_edit.timestamp));
-                    let file_name_changed = *new_file_name != *old_file_name;
-
-                    if file_name_changed && saves.contains_key(&new_file_name) {
-                        self.file_exists_warning_modal_open = true;
-                    } else {
-                        let costume = saves.get_mut(costume_file_name).unwrap();
-                        costume.save_name = costume_edit.save_name.clone();
-                        costume.j2000_timestamp = costume_edit.timestamp;
-                        if costume_edit.edit_type == CostumeEditType::Simple {
-                            costume.set_account_name(costume_edit.simple_name.clone());
-                            costume.set_character_name(String::from(""));
-                        } else {
-                            costume.set_account_name(costume_edit.account_name.clone());
-                            costume.set_character_name(costume_edit.character_name.clone());
-                            costume.set_costume_spec(costume_edit.costume_spec.clone());
-                            costume.set_costume_hash(costume_edit.costume_hash.clone());
-                        }
-                        let serialized = costume.jpeg.serialize();
-
-                        let mut file = fs::File::create(&new_file_name).unwrap_or_else(|err| {
-                            eprintln!("Failed to open {:?} for writing: {err}", new_file_name);
-                            std::process::exit(1);
+                        ui.label("In-Game Display:");
+                        ui.label(match costume_edit.edit_type {
+                            CostumeEditType::Simple => get_in_game_display_name(&costume_edit.simple_name, "", costume_edit.timestamp),
+                            CostumeEditType::Advanced => get_in_game_display_name(&costume_edit.account_name, &costume_edit.character_name, costume_edit.timestamp),
                         });
-                        if let Err(err) = file.write_all(&serialized) {
-                            eprintln!("failed to write to file {:?}: {err}", new_file_name);
-                            std::process::exit(1);
+                    });
+
+                    ui.separator();
+
+                    ui.horizontal(|ui| {
+                        ui.label("Edit Type:");
+                        ui.selectable_value(&mut costume_edit.edit_type, CostumeEditType::Simple, "Simple");
+                        ui.selectable_value(&mut costume_edit.edit_type, CostumeEditType::Advanced, "Advanced");
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Save Name:");
+                        ui.text_edit_singleline(&mut costume_edit.save_name);
+                    });
+                    if costume.j2000_timestamp.is_some() {
+                        ui.checkbox(&mut costume_edit.strip_timestamp, "Strip Timestamp");
+                        if costume_edit.strip_timestamp {
+                            costume_edit.timestamp = None;
+                        } else {
+                            costume_edit.timestamp = costume.j2000_timestamp;
                         }
+                    }
 
-                        if file_name_changed {
-                            #[cfg(windows)]
-                            {
-                                use std::os::windows::fs::FileTimesExt;
-                                let old_file = fs::File::open(old_file_name).unwrap_or_else(|err| {
-                                    eprintln!("failed to open original file {:?} for reading: {err}", old_file_name);
-                                    std::process::exit(1);
-                                });
-                                let old_metadata = old_file.metadata().unwrap_or_else(|err| {
-                                    eprintln!("failed to get metadata for original file {:?}: {err}", old_file_name);
-                                    std::process::exit(1);
-                                });
-                                let new_metadata = file.metadata().unwrap_or_else(|err| {
-                                    eprintln!("failed to get metadata for new file {new_file_name:?}: {err}");
-                                    std::process::exit(1);
-                                });
-                                // SAFETY: This section is conditionally compiled for windows so
-                                // setting/getting the file creation time should not error.
-                                let times = fs::FileTimes::new()
-                                    .set_created(old_metadata.created().unwrap())
-                                    .set_accessed(new_metadata.accessed().unwrap())
-                                    .set_modified(new_metadata.modified().unwrap());
-                                if let Err(err) = file.set_times(times) {
-                                    eprintln!("failed to update filetimes for {new_file_name:?}: {err}");
-                                    std::process::exit(1);
-                                }
+                    if costume_edit.edit_type == CostumeEditType::Simple {
+                        ui.horizontal(|ui| {
+                            ui.label("Name (in-game):");
+                            ui.text_edit_singleline(&mut costume_edit.simple_name);
+                        });
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.label("Account Name:");
+                            ui.text_edit_singleline(&mut costume_edit.account_name);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Character Name:");
+                            ui.text_edit_singleline(&mut costume_edit.character_name);
+                        });
+                        if ui.button("Edit Spec").clicked() {
+                            self.costume_spec_edit_open = true;
+                        }
+                    }
+
+                    // TODO If the user is not on windows, maybe we need to change how we're saving
+                    // things. Instead of writing a new file then deleting the old and attempting to
+                    // update the file creation times, maybe we should just overwrite the old so that
+                    // we keep the file creation time.
+                    // FIXME Logging, not crashing!
+                    if ui.button("Save").clicked() {
+                        let old_file_name = costume_file_name;
+                        let new_file_name = OsString::from(get_file_name(&costume_edit.save_name, costume_edit.timestamp));
+                        let file_name_changed = *new_file_name != *old_file_name;
+
+                        if file_name_changed && saves.contains_key(&new_file_name) {
+                            self.file_exists_warning_modal_open = true;
+                        } else {
+                            let costume = saves.get_mut(costume_file_name).unwrap();
+                            costume.save_name = costume_edit.save_name.clone();
+                            costume.j2000_timestamp = costume_edit.timestamp;
+                            if costume_edit.edit_type == CostumeEditType::Simple {
+                                costume.set_account_name(costume_edit.simple_name.clone());
+                                costume.set_character_name(String::from(""));
+                            } else {
+                                costume.set_account_name(costume_edit.account_name.clone());
+                                costume.set_character_name(costume_edit.character_name.clone());
+                                costume.set_costume_spec(costume_edit.costume_spec.clone());
+                                costume.set_costume_hash(costume_edit.costume_hash.clone());
                             }
+                            let serialized = costume.jpeg.serialize();
 
-                            if let Err(err) = fs::remove_file(old_file_name) {
-                                eprintln!("failed to remove original file {old_file_name:?}: {err}");
+                            let mut file = fs::File::create(&new_file_name).unwrap_or_else(|err| {
+                                eprintln!("Failed to open {:?} for writing: {err}", new_file_name);
+                                std::process::exit(1);
+                            });
+                            if let Err(err) = file.write_all(&serialized) {
+                                eprintln!("failed to write to file {:?}: {err}", new_file_name);
                                 std::process::exit(1);
                             }
 
-                            // FIXME really lazy and inefficient. I don't think we can know where the new
-                            // save name will be after sorting (maybe we actually can) but we can probably
-                            // pass along the index of the old save with this event. Would eliminate an
-                            // entire scan through the sorted_saves array.
-                            let (old_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| *save == old_file_name).unwrap();
-                            assert!(self.selected_costumes.remove(&old_index));
+                            if file_name_changed {
+                                #[cfg(windows)]
+                                {
+                                    use std::os::windows::fs::FileTimesExt;
+                                    let old_file = fs::File::open(old_file_name).unwrap_or_else(|err| {
+                                        eprintln!("failed to open original file {:?} for reading: {err}", old_file_name);
+                                        std::process::exit(1);
+                                    });
+                                    let old_metadata = old_file.metadata().unwrap_or_else(|err| {
+                                        eprintln!("failed to get metadata for original file {:?}: {err}", old_file_name);
+                                        std::process::exit(1);
+                                    });
+                                    let new_metadata = file.metadata().unwrap_or_else(|err| {
+                                        eprintln!("failed to get metadata for new file {new_file_name:?}: {err}");
+                                        std::process::exit(1);
+                                    });
+                                    // SAFETY: This section is conditionally compiled for windows so
+                                    // setting/getting the file creation time should not error.
+                                    let times = fs::FileTimes::new()
+                                        .set_created(old_metadata.created().unwrap())
+                                        .set_accessed(new_metadata.accessed().unwrap())
+                                        .set_modified(new_metadata.modified().unwrap());
+                                    if let Err(err) = file.set_times(times) {
+                                        eprintln!("failed to update filetimes for {new_file_name:?}: {err}");
+                                        std::process::exit(1);
+                                    }
+                                }
 
-                            let save = saves.remove(old_file_name).unwrap();
-                            saves.insert(new_file_name.clone(), save);
-                            self.sorted_saves = saves.keys().cloned().collect();
-                            Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
+                                if let Err(err) = fs::remove_file(old_file_name) {
+                                    eprintln!("failed to remove original file {old_file_name:?}: {err}");
+                                    std::process::exit(1);
+                                }
 
-                            let (new_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| **save == new_file_name).unwrap();
-                            self.selected_costumes.insert(new_index);
-                        } else if matches!(self.sort_type, SortType::CreationTime | SortType::ModifiedTime) {
-                            // normal save
-                            // TODO maybe also send this through the ui message system?
-                            Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
+                                // FIXME really lazy and inefficient. I don't think we can know where the new
+                                // save name will be after sorting (maybe we actually can) but we can probably
+                                // pass along the index of the old save with this event. Would eliminate an
+                                // entire scan through the sorted_saves array.
+                                let (old_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| *save == old_file_name).unwrap();
+                                assert!(self.selected_costumes.remove(&old_index));
+
+                                let save = saves.remove(old_file_name).unwrap();
+                                saves.insert(new_file_name.clone(), save);
+                                self.sorted_saves = saves.keys().cloned().collect();
+                                Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
+
+                                let (new_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| **save == new_file_name).unwrap();
+                                self.selected_costumes.insert(new_index);
+                            } else if matches!(self.sort_type, SortType::CreationTime | SortType::ModifiedTime) {
+                                // normal save
+                                // TODO maybe also send this through the ui message system?
+                                Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
+                            }
+
+                            // TODO find a way to compress this code since we do the exact same thing when
+                            // deleting files.
+
+                            // Signal to the scanning thread that we initiated the file system change.
+                            // This avoids cases where we update the file system, react to the update,
+                            // then the scanner sees that something was changed and gives us ANOTHER
+                            // notification that the file system was changed.
+                            let current_dir = env::current_dir().unwrap();
+                            let last_modified_time = fs::metadata(&current_dir).unwrap().modified().unwrap();
+                            // TODO log failure
+                            let _ = self.scanner_tx.send(last_modified_time);
                         }
-
-                        // TODO find a way to compress this code since we do the exact same thing when
-                        // deleting files.
-
-                        // Signal to the scanning thread that we initiated the file system change.
-                        // This avoids cases where we update the file system, react to the update,
-                        // then the scanner sees that something was changed and gives us ANOTHER
-                        // notification that the file system was changed.
-                        let current_dir = env::current_dir().unwrap();
-                        let last_modified_time = fs::metadata(&current_dir).unwrap().modified().unwrap();
-                        // TODO log failure
-                        let _ = self.scanner_tx.send(last_modified_time);
                     }
                 }
 
-                if ui.button("Delete").clicked() {
-                    // TODO show confirmation popup before deleting
-                    // TODO should we dispatch an event and process deletion at the start of the
-                    // frame instead of doing it inline here?
-                    fs::remove_file(costume_file_name).expect("Failed to delete file");
-                    saves.remove(costume_file_name);
-                    self.sorted_saves = saves.keys().cloned().collect();
-                    Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
-                    self.selected_costumes.clear();
-
-                    // TODO find a way to compress this code since we do the exact same thing when
-                    // saving files.
-
-                    // Signal to the scanning thread that we initiated the file system change.
-                    // This avoids cases where we update the file system, react to the update,
-                    // then the scanner sees that something was changed and gives us ANOTHER
-                    // notification that the file system was changed.
-                    let current_dir = env::current_dir().unwrap();
-                    let last_modified_time = fs::metadata(&current_dir).unwrap().modified().unwrap();
-                    // TODO log failure
-                    let _ = self.scanner_tx.send(last_modified_time);
-                }
-            } else if self.selected_costumes.len() > 1 {
-                ui.label(format!("{} selected items", self.selected_costumes.len()));
                 if ui.button("Delete").clicked() {
                     // TODO show delete confirmation popup
                     for selected_idx in self.selected_costumes.iter() {
@@ -654,9 +644,8 @@ impl eframe::App for App {
                     // TODO log failure
                     let _ = self.scanner_tx.send(last_modified_time);
                 }
-            } else {
-                ui.label("Select a save to view details");
             }
+
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
