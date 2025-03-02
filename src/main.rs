@@ -252,7 +252,6 @@ impl CostumeSaveFile {
 enum UiMessage {
     /// We have detected that the file system has changed underneath us in some way.
     FileListChangedExternally,
-    FileRenamed { old: OsString, new: OsString },
 }
 
 #[derive(PartialEq)]
@@ -386,29 +385,6 @@ impl eframe::App for App {
                     self.sorted_saves = saves.keys().cloned().collect();
                     Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
                 },
-
-                UiMessage::FileRenamed { old, new } => {
-                    assert_eq!(
-                        self.selected_costumes.len(),
-                        1,
-                        "Received a FileRenamed event with 0 or multiple items selected. Do we need to account for those cases?"
-                    );
-
-                    // FIXME really lazy and inefficient. I don't think we can know where the new
-                    // save name will be after sorting (maybe we actually can) but we can probably
-                    // pass along the index of the old save with this event. Would eliminate an
-                    // entire scan through the sorted_saves array.
-                    let (old_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| **save == old).unwrap();
-                    assert!(self.selected_costumes.remove(&old_index));
-
-                    let save = saves.remove(&old).unwrap();
-                    saves.insert(new.clone(), save);
-                    self.sorted_saves = saves.keys().cloned().collect();
-                    Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
-
-                    let (new_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| **save == new).unwrap();
-                    self.selected_costumes.insert(new_index);
-                }
             }
         }
 
@@ -598,7 +574,20 @@ impl eframe::App for App {
                                 std::process::exit(1);
                             }
 
-                            _ = self.ui_message_tx.send(UiMessage::FileRenamed { old: old_file_name.clone(), new: new_file_name });
+                            // FIXME really lazy and inefficient. I don't think we can know where the new
+                            // save name will be after sorting (maybe we actually can) but we can probably
+                            // pass along the index of the old save with this event. Would eliminate an
+                            // entire scan through the sorted_saves array.
+                            let (old_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| *save == old_file_name).unwrap();
+                            assert!(self.selected_costumes.remove(&old_index));
+
+                            let save = saves.remove(old_file_name).unwrap();
+                            saves.insert(new_file_name.clone(), save);
+                            self.sorted_saves = saves.keys().cloned().collect();
+                            Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
+
+                            let (new_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| **save == new_file_name).unwrap();
+                            self.selected_costumes.insert(new_index);
                         } else if matches!(self.sort_type, SortType::CreationTime | SortType::ModifiedTime) {
                             // normal save
                             // TODO maybe also send this through the ui message system?
