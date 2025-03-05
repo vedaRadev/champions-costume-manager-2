@@ -585,9 +585,15 @@ impl eframe::App for App {
                                     }
                                 }
 
-                                if let Err(err) = fs::remove_file(old_file_name) {
-                                    eprintln!("failed to remove original file {old_file_name:?}: {err}");
-                                    std::process::exit(1);
+                                // NOTE: Windows' file system is case insensitive. If we're on Windows and only the
+                                // casing was changed then we DON'T want to remove the file because we'll actually just
+                                // be removing our new file.
+                                if !cfg!(windows) || !new_file_name.eq_ignore_ascii_case(old_file_name) {
+                                    println!("removing old");
+                                    if let Err(err) = fs::remove_file(old_file_name) {
+                                        eprintln!("failed to remove original file {old_file_name:?}: {err}");
+                                        std::process::exit(1);
+                                    }
                                 }
 
                                 // FIXME really lazy and inefficient. I don't think we can know where the new
