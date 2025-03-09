@@ -290,6 +290,7 @@ struct App {
     file_exists_warning_modal_open: bool,
     show_images_in_selection_list: bool,
     costume_spec_edit_open: bool,
+    confirm_edit_spec: bool,
     sorted_saves: Vec<OsString>,
     /// Values are indices into self.sorted_saves.
     selected_costumes: HashSet<usize>,
@@ -318,6 +319,7 @@ impl App {
             file_exists_warning_modal_open: false,
             show_images_in_selection_list: false,
             costume_spec_edit_open: false,
+            confirm_edit_spec: false,
             sorted_saves: vec![],
             selected_costumes: HashSet::new(),
             selection_range_pivot: 0,
@@ -398,12 +400,23 @@ impl eframe::App for App {
         }
 
         if self.costume_spec_edit_open {
+            assert_eq!(self.selected_costumes.len(), 1);
+
             // TODO figure out how to make this modal wider
             let modal = egui::Modal::new(egui::Id::new("Costume Spec Edit"));
             modal.show(ctx, |ui| {
                 ui.label("EDITING THE COSTUME SPEC IS AN EXPERIMENTAL AND DANGEROUS FEATURE! BEWARE!");
                 ui.label("Incorrectly modifying the costume spec can corrupt your save and make it unloadable in-game! Make a backup!");
                 ui.label("Spec changes will be saved upon closing this modal and saving the costume.");
+                if ui.checkbox(&mut self.confirm_edit_spec, "I have read and understand the above warnings and want to proceed (toggle off to revert all changes)").changed() && !self.confirm_edit_spec {
+                    // Reset to original in case user made changes but then changed their mind.
+                    // FIXME unnecessary clone if the user hasn't changed the spec/hash and is just
+                    // toggling the checkbox on/off for some reason.
+                    let save_idx = self.selected_costumes.iter().last().unwrap();
+                    let save = &saves[&self.sorted_saves[*save_idx]];
+                    self.costume_edit.as_mut().unwrap().costume_spec = save.get_costume_spec().to_owned();
+                    self.costume_edit.as_mut().unwrap().costume_hash = save.get_costume_hash().to_owned();
+                }
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("Hash:");
@@ -412,7 +425,8 @@ impl eframe::App for App {
 
                 let scroll_area = egui::ScrollArea::vertical().max_height(500.0);
                 scroll_area.show(ui, |ui| {
-                    let spec_editor = ui.add(
+                    let spec_editor = ui.add_enabled(
+                        self.confirm_edit_spec,
                         egui::TextEdit::multiline(&mut self.costume_edit.as_mut().unwrap().costume_spec)
                             .code_editor()
                             .desired_rows(12)
@@ -425,7 +439,8 @@ impl eframe::App for App {
                 });
 
                 ui.centered_and_justified(|ui| {
-                    if ui.button("Close").clicked() {
+                    let close_text = if self.confirm_edit_spec { "Save and Close" } else { "Cancel and Close" };
+                    if ui.button(close_text).clicked() {
                         self.costume_spec_edit_open = false;
                     }
                 });
