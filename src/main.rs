@@ -260,19 +260,11 @@ enum UiMessage {
     FileListChangedExternally,
 }
 
-#[derive(PartialEq)]
-enum CostumeEditType { Simple, Advanced }
-impl Default for CostumeEditType {
-    fn default() -> Self { Self::Simple }
-}
-
 #[derive(Default)]
 // TODO Maybe most of this could be Cows instead of explicitly owned data?
 struct CostumeEdit {
-    edit_type: CostumeEditType,
     strip_timestamp: bool,
     timestamp: Option<i64>,
-    simple_name: String,
     save_name: String,
     account_name: String,
     character_name: String,
@@ -410,8 +402,8 @@ impl eframe::App for App {
             let modal = egui::Modal::new(egui::Id::new("Costume Spec Edit"));
             modal.show(ctx, |ui| {
                 ui.label("EDITING THE COSTUME SPEC IS AN EXPERIMENTAL AND DANGEROUS FEATURE! BEWARE!");
+                ui.label("Incorrectly modifying the costume spec can corrupt your save and make it unloadable in-game! Make a backup!");
                 ui.label("Spec changes will be saved upon closing this modal and saving the costume.");
-                ui.label("If the edit type is \"Simple\", costume spec changes will not be saved.");
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("Hash:");
@@ -472,19 +464,10 @@ impl eframe::App for App {
                     // FIXME again, don't want to construct this every frame
                     ui.horizontal(|ui| {
                         ui.label("In-Game Display:");
-                        ui.label(match costume_edit.edit_type {
-                            CostumeEditType::Simple => get_in_game_display_name(&costume_edit.simple_name, "", costume_edit.timestamp),
-                            CostumeEditType::Advanced => get_in_game_display_name(&costume_edit.account_name, &costume_edit.character_name, costume_edit.timestamp),
-                        });
+                        ui.label(get_in_game_display_name(&costume_edit.account_name, &costume_edit.character_name, costume_edit.timestamp));
                     });
 
                     ui.separator();
-
-                    ui.horizontal(|ui| {
-                        ui.label("Edit Type:");
-                        ui.selectable_value(&mut costume_edit.edit_type, CostumeEditType::Simple, "Simple");
-                        ui.selectable_value(&mut costume_edit.edit_type, CostumeEditType::Advanced, "Advanced");
-                    });
 
                     ui.horizontal(|ui| {
                         ui.label("Save Name:");
@@ -499,23 +482,16 @@ impl eframe::App for App {
                         }
                     }
 
-                    if costume_edit.edit_type == CostumeEditType::Simple {
-                        ui.horizontal(|ui| {
-                            ui.label("Name (in-game):");
-                            ui.text_edit_singleline(&mut costume_edit.simple_name);
-                        });
-                    } else {
-                        ui.horizontal(|ui| {
-                            ui.label("Account Name:");
-                            ui.text_edit_singleline(&mut costume_edit.account_name);
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Character Name:");
-                            ui.text_edit_singleline(&mut costume_edit.character_name);
-                        });
-                        if ui.button("Edit Spec").clicked() {
-                            self.costume_spec_edit_open = true;
-                        }
+                    ui.horizontal(|ui| {
+                        ui.label("Account Name:");
+                        ui.text_edit_singleline(&mut costume_edit.account_name);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Character Name:");
+                        ui.text_edit_singleline(&mut costume_edit.character_name);
+                    });
+                    if ui.button("Edit Spec").clicked() {
+                        self.costume_spec_edit_open = true;
                     }
 
                     // TODO no-op if nothing was changed (maybe disable button?)
@@ -537,15 +513,10 @@ impl eframe::App for App {
                             let costume = saves.get_mut(costume_file_name).unwrap();
                             costume.save_name = costume_edit.save_name.clone();
                             costume.j2000_timestamp = costume_edit.timestamp;
-                            if costume_edit.edit_type == CostumeEditType::Simple {
-                                costume.set_account_name(costume_edit.simple_name.clone());
-                                costume.set_character_name(String::from(""));
-                            } else {
-                                costume.set_account_name(costume_edit.account_name.clone());
-                                costume.set_character_name(costume_edit.character_name.clone());
-                                costume.set_costume_spec(costume_edit.costume_spec.clone());
-                                costume.set_costume_hash(costume_edit.costume_hash.clone());
-                            }
+                            costume.set_account_name(costume_edit.account_name.clone());
+                            costume.set_character_name(costume_edit.character_name.clone());
+                            costume.set_costume_spec(costume_edit.costume_spec.clone());
+                            costume.set_costume_hash(costume_edit.costume_hash.clone());
                             let serialized = costume.jpeg.serialize();
 
                             let mut file = fs::File::create(&new_file_name).unwrap_or_else(|err| {
@@ -589,7 +560,6 @@ impl eframe::App for App {
                                 // casing was changed then we DON'T want to remove the file because we'll actually just
                                 // be removing our new file.
                                 if !cfg!(windows) || !new_file_name.eq_ignore_ascii_case(old_file_name) {
-                                    println!("removing old");
                                     if let Err(err) = fs::remove_file(old_file_name) {
                                         eprintln!("failed to remove original file {old_file_name:?}: {err}");
                                         std::process::exit(1);
@@ -806,13 +776,11 @@ impl eframe::App for App {
                                 let account_name = save.get_account_name().to_owned();
                                 let character_name = save.get_character_name().to_owned();
                                 let timestamp = save.j2000_timestamp;
-                                let simple_name = format!("{}{}", account_name, character_name);
                                 let costume_spec = save.get_costume_spec().to_owned();
                                 let costume_hash = save.get_costume_hash().to_owned();
 
                                 if let Some(costume_edit) = self.costume_edit.as_mut() {
                                     costume_edit.save_name = save_name;
-                                    costume_edit.simple_name = simple_name;
                                     costume_edit.account_name = account_name;
                                     costume_edit.character_name = character_name;
                                     costume_edit.timestamp = timestamp;
@@ -821,7 +789,6 @@ impl eframe::App for App {
                                     costume_edit.costume_hash = costume_hash;
                                 } else {
                                     self.costume_edit = Some(CostumeEdit {
-                                        simple_name,
                                         save_name,
                                         account_name,
                                         character_name,
