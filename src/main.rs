@@ -509,97 +509,99 @@ impl eframe::App for App {
                         self.costume_spec_edit_open = true;
                     }
 
-                    // TODO no-op if nothing was changed (maybe disable button?)
-                    // TODO only reserialize data if costume edit fields were changed (i.e.
-                    // optimize for case where only the file name was changed).
-                    // TODO If the user is not on windows, maybe we need to change how we're saving
-                    // things. Instead of writing a new file then deleting the old and attempting to
-                    // update the file creation times, maybe we should just overwrite the old so that
-                    // we keep the file creation time.
+                    // TODO disable button if nothing was changed?
+                    // TODO if only file name was changed maybe only rename the file via OS?
                     // FIXME Logging, not crashing!
                     if ui.button("Save").clicked() {
                         let old_file_name = costume_file_name;
-                        let new_file_name = OsString::from(get_file_name(&costume_edit.save_name, costume_edit.timestamp));
+                        let new_file_name = get_file_name(&costume_edit.save_name, costume_edit.timestamp);
+                        let temp_file_name = OsString::from(format!("{new_file_name}.CCM_TEMP"));
+                        let new_file_name = OsString::from(new_file_name);
                         let file_name_changed = *new_file_name != *old_file_name;
 
+                        // FIXME There is potentially a massive, terrible bug here on Windows where
+                        // we're NOT catching here due to Windows' case insensitivity! If we've
+                        // changed the file name but saves contains the same name with a different
+                        // casing, we WON'T catch it!
                         if file_name_changed && saves.contains_key(&new_file_name) {
                             self.file_exists_warning_modal_open = true;
                         } else {
                             let costume = saves.get_mut(costume_file_name).unwrap();
-                            costume.save_name = costume_edit.save_name.clone();
-                            costume.j2000_timestamp = costume_edit.timestamp;
+                            let mut temp_file = fs::File::create(&temp_file_name).unwrap_or_else(|err| {
+                                eprintln!("Failed to open {:?} for writing: {err}", temp_file_name);
+                                std::process::exit(1);
+                            });
+
                             costume.set_account_name(costume_edit.account_name.clone());
                             costume.set_character_name(costume_edit.character_name.clone());
                             costume.set_costume_spec(costume_edit.costume_spec.clone());
                             costume.set_costume_hash(costume_edit.costume_hash.clone());
                             let serialized = costume.jpeg.serialize();
 
-                            let mut file = fs::File::create(&new_file_name).unwrap_or_else(|err| {
-                                eprintln!("Failed to open {:?} for writing: {err}", new_file_name);
+                            if let Err(err) = temp_file.write_all(&serialized) {
+                                eprintln!("failed to write to file {:?}: {err}", temp_file_name);
                                 std::process::exit(1);
-                            });
-                            if let Err(err) = file.write_all(&serialized) {
-                                eprintln!("failed to write to file {:?}: {err}", new_file_name);
-                                std::process::exit(1);
+                            } else {
+                                println!("wrote to {:?}", temp_file_name);
                             }
 
                             if file_name_changed {
-                                #[cfg(windows)]
-                                {
-                                    use std::os::windows::fs::FileTimesExt;
-                                    let old_file = fs::File::open(old_file_name).unwrap_or_else(|err| {
-                                        eprintln!("failed to open original file {:?} for reading: {err}", old_file_name);
-                                        std::process::exit(1);
-                                    });
-                                    let old_metadata = old_file.metadata().unwrap_or_else(|err| {
-                                        eprintln!("failed to get metadata for original file {:?}: {err}", old_file_name);
-                                        std::process::exit(1);
-                                    });
-                                    let new_metadata = file.metadata().unwrap_or_else(|err| {
-                                        eprintln!("failed to get metadata for new file {new_file_name:?}: {err}");
-                                        std::process::exit(1);
-                                    });
-                                    // SAFETY: This section is conditionally compiled for windows so
-                                    // setting/getting the file creation time should not error.
-                                    let times = fs::FileTimes::new()
-                                        .set_created(old_metadata.created().unwrap())
-                                        .set_accessed(new_metadata.accessed().unwrap())
-                                        .set_modified(new_metadata.modified().unwrap());
-                                    if let Err(err) = file.set_times(times) {
-                                        eprintln!("failed to update filetimes for {new_file_name:?}: {err}");
-                                        std::process::exit(1);
-                                    }
-                                }
-
-                                // NOTE: Windows' file system is case insensitive. If we're on Windows and only the
-                                // casing was changed then we DON'T want to remove the file because we'll actually just
-                                // be removing our new file.
-                                if !cfg!(windows) || !new_file_name.eq_ignore_ascii_case(old_file_name) {
-                                    if let Err(err) = fs::remove_file(old_file_name) {
-                                        eprintln!("failed to remove original file {old_file_name:?}: {err}");
-                                        std::process::exit(1);
-                                    }
-                                }
-
-                                // FIXME really lazy and inefficient. I don't think we can know where the new
-                                // save name will be after sorting (maybe we actually can) but we can probably
-                                // pass along the index of the old save with this event. Would eliminate an
-                                // entire scan through the sorted_saves array.
-                                let (old_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| *save == old_file_name).unwrap();
-                                assert!(self.selected_costumes.remove(&old_index));
-
-                                let save = saves.remove(old_file_name).unwrap();
-                                saves.insert(new_file_name.clone(), save);
-                                self.sorted_saves = saves.keys().cloned().collect();
-                                Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
-
-                                let (new_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| **save == new_file_name).unwrap();
-                                self.selected_costumes.insert(new_index);
-                            } else if matches!(self.sort_type, SortType::CreationTime | SortType::ModifiedTime) {
-                                // normal save
-                                // TODO maybe also send this through the ui message system?
-                                Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
+                                costume.save_name = costume_edit.save_name.clone();
+                                costume.j2000_timestamp = costume_edit.timestamp;
                             }
+
+                            // Need to copy old creation time to new file
+                            #[cfg(windows)]
+                            {
+                                use std::os::windows::fs::FileTimesExt;
+                                let old_file = fs::File::open(old_file_name).unwrap_or_else(|err| {
+                                    eprintln!("failed to open original file {:?} for reading: {err}", old_file_name);
+                                    std::process::exit(1);
+                                });
+                                let old_metadata = old_file.metadata().unwrap_or_else(|err| {
+                                    eprintln!("failed to get metadata for original file {:?}: {err}", old_file_name);
+                                    std::process::exit(1);
+                                });
+                                let new_metadata = temp_file.metadata().unwrap_or_else(|err| {
+                                    eprintln!("failed to get metadata for new file {new_file_name:?}: {err}");
+                                    std::process::exit(1);
+                                });
+                                // SAFETY: This section is conditionally compiled for windows so
+                                // setting/getting the file creation time should not error.
+                                let times = fs::FileTimes::new()
+                                    .set_created(old_metadata.created().unwrap())
+                                    .set_accessed(new_metadata.accessed().unwrap())
+                                    .set_modified(new_metadata.modified().unwrap());
+                                if let Err(err) = temp_file.set_times(times) {
+                                    eprintln!("failed to update filetimes for {temp_file_name:?}: {err}");
+                                    std::process::exit(1);
+                                }
+                            }
+
+                            if let Err(err) = fs::remove_file(old_file_name) {
+                                eprintln!("failed to remove original file {old_file_name:?}: {err}");
+                                std::process::exit(1);
+                            }
+
+                            if let Err(err) = fs::rename(temp_file_name, &new_file_name) {
+                                eprintln!("failed to rename temp file: {err}");
+                                std::process::exit(1);
+                            }
+
+                            // FIXME really lazy and inefficient. I don't think we can know where the new
+                            // save name will be after sorting (maybe we actually can) but we can probably
+                            // pass along the index of the old save with this event. Would eliminate an
+                            // entire scan through the sorted_saves array.
+                            let (old_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| *save == old_file_name).unwrap();
+                            assert!(self.selected_costumes.remove(&old_index));
+
+                            let save = saves.remove(old_file_name).unwrap();
+                            saves.insert(new_file_name.clone(), save);
+                            self.sorted_saves = saves.keys().cloned().collect();
+                            Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
+
+                            let (new_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| **save == new_file_name).unwrap();
+                            self.selected_costumes.insert(new_index);
 
                             // TODO find a way to compress this code since we do the exact same thing when
                             // deleting files.
