@@ -1,5 +1,11 @@
 <sub>Note: project/repo name is just a working title and may change in the future.</sub>
+
 # Champions Costume Manager 2
+
+NOTE: This documentation is slightly outdated. Usage information relates to the
+command-line tool found at the `cmdline-tool` tag. `main` currently contains GUI
+development.
+
 An offline tool for managing in-game displays of costume save files in Champions
 Online. This will initially be a command-line tool but the plan is to eventually
 have a functional GUI serve as the primary form of user interaction.
