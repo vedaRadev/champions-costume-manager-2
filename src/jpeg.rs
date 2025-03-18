@@ -2,6 +2,8 @@
 // TODO proper image decode of SOS segment
 use byteorder::{ ByteOrder, BigEndian };
 use std::collections::{ HashMap, BTreeMap };
+use std::sync::{ Arc, RwLock, RwLockReadGuard, RwLockWriteGuard };
+use std::ops::{ Deref, DerefMut };
 
 const JPEG_MARKER_SOI: u8 = 0xD8;
 const JPEG_MARKER_EOI: u8 = 0xD9;
@@ -189,18 +191,49 @@ impl JpegApp13Payload {
 // https://dev.exiv2.org/projects/exiv2/wiki/The_Metadata_in_JPEG_files
 pub struct JpegSegment {
     segment_type: JpegSegmentType,
-    payload: Option<Box<[u8]>>,
-    additional_data: Option<Box<[u8]>>,
+    payload: Option<Arc<RwLock<Box<[u8]>>>>,
+    // NOTE(RA): Currently no expectation that any additional data needs to be modified after load.
+    additional_data: Option<Arc<Box<[u8]>>>,
+}
+
+pub struct LockedTypedPayload<'a, T> {
+    pub _guard: RwLockReadGuard<'a, Box<[u8]>>,
+    pub typed_payload: &'a T
+}
+
+impl<'a, T> Deref for LockedTypedPayload<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target { self.typed_payload }
+}
+
+pub struct LockedTypedPayloadMut<'a, T> {
+    _guard: RwLockWriteGuard<'a, Box<[u8]>>,
+    typed_payload: &'a mut T
+}
+
+impl<'a, T> Deref for LockedTypedPayloadMut<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target { self.typed_payload }
+}
+
+impl<'a, T> DerefMut for LockedTypedPayloadMut<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target { self.typed_payload }
 }
 
 // FIXME need to guard against the payload not matching the segment type!
 impl JpegSegment {
-    pub fn get_payload_as<T: SegmentPayload>(&self) -> &T {
-        unsafe { &*(self.payload.as_ref().unwrap().as_ptr() as *mut T) }
+    // NOTE(RA): If these types get annoying, just return (RwLockReadGuard<Box<[u8]>>, &T) instead
+    // and hope that the caller doesn't drop the guard or &T separately for some reason.
+    pub fn get_payload_as<T: SegmentPayload>(&self) -> LockedTypedPayload<T> {
+        let guard = self.payload.as_ref().unwrap().read().unwrap();
+        let typed_payload = unsafe { &*(guard.as_ptr() as *const T) };
+        LockedTypedPayload { _guard: guard, typed_payload }
     }
 
-    pub fn get_payload_as_mut<T: SegmentPayload>(&mut self) -> &mut T {
-        unsafe { &mut *(self.payload.as_mut().unwrap().as_ptr() as *mut T) }
+    pub fn get_payload_as_mut<T: SegmentPayload>(&mut self) -> LockedTypedPayloadMut<T> {
+        let guard = self.payload.as_mut().unwrap().write().unwrap();
+        let typed_payload = unsafe { &mut *(guard.as_ptr() as *mut T) };
+        LockedTypedPayloadMut { _guard: guard, typed_payload }
     }
 
     fn serialize(&self) -> Box<[u8]> {
@@ -257,11 +290,12 @@ impl JpegSegment {
 
             _ => {
                 if let Some(payload) = &self.payload {
+                    let payload = payload.read().unwrap();
                     serialized_segment.extend(((payload.len() + std::mem::size_of::<u16>()) as u16).to_be_bytes());
-                    serialized_segment.extend(payload);
+                    serialized_segment.extend(payload.iter().copied());
                 }
                 if let Some(additional_data) = &self.additional_data {
-                    serialized_segment.extend(additional_data);
+                    serialized_segment.extend(additional_data.iter().copied());
                 }
             }
         }
@@ -322,6 +356,7 @@ impl From<std::io::Error> for ParseError {
 }
 
 pub struct Jpeg {
+
     // TODO swap out the hashing function for something faster (default isn't great for small keys)
     segment_indices: HashMap<JpegSegmentType, Vec<usize>>,
     segments: Vec<JpegSegment>
@@ -449,8 +484,8 @@ impl Jpeg {
                     let index = parsed.segments.len();
                     parsed.segments.push(JpegSegment {
                         segment_type,
-                        payload: Some(payload),
-                        additional_data: Some(image_data.into_boxed_slice())
+                        payload: Some(Arc::new(RwLock::new(payload))),
+                        additional_data: Some(image_data.into_boxed_slice().into())
                     });
                     parsed.segment_indices.entry(segment_type).and_modify(|v| v.push(index)).or_insert(vec![index]);
                 },
@@ -532,6 +567,7 @@ impl Jpeg {
                         datasets,
                     });
                     let payload = unsafe { Box::from_raw(std::slice::from_raw_parts_mut(Box::into_raw(payload) as *mut u8, std::mem::size_of::<JpegApp13Payload>())) };
+                    let payload = Arc::new(RwLock::new(payload));
 
                     let segment_type = JpegSegmentType::APP13;
                     let index = parsed.segments.len();
@@ -555,7 +591,7 @@ impl Jpeg {
                     let payload = if segment_payload_size > 0 {
                         let mut payload = vec![0u8; segment_payload_size as usize];
                         jpeg_raw.read_exact(&mut payload)?;
-                        Some(payload.into_boxed_slice())
+                        Some(Arc::new(RwLock::new(payload.into_boxed_slice())))
                     } else {
                         None
                     };
