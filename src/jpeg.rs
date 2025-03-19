@@ -188,6 +188,7 @@ impl JpegApp13Payload {
 }
 
 // https://dev.exiv2.org/projects/exiv2/wiki/The_Metadata_in_JPEG_files
+#[derive(Clone)]
 pub struct JpegSegment {
     segment_type: JpegSegmentType,
     payload: Option<Arc<RwLock<Box<[u8]>>>>,
@@ -330,6 +331,7 @@ impl From<std::io::Error> for ParseError {
     }
 }
 
+#[derive(Clone)]
 pub struct Jpeg {
     // TODO swap out the hashing function for something faster (default isn't great for small keys)
     segment_indices: HashMap<JpegSegmentType, Vec<usize>>,
@@ -337,7 +339,7 @@ pub struct Jpeg {
 }
 
 impl Jpeg {
-    pub fn parse(jpeg_raw: Vec<u8>) -> Result<Self, ParseError>  {
+    pub fn parse(jpeg_raw: &[u8]) -> Result<Self, ParseError>  {
         use std::io::{prelude::*, BufRead, Cursor};
         let mut jpeg_raw = Cursor::new(jpeg_raw);
 

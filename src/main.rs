@@ -11,6 +11,8 @@
 // Maybe it would be better to just lock the entire app13 payload and return that, then have some
 // methods that will get the individual fields out?
 //
+// TODO gracefully shut down threads on program exit
+//
 // FIXME I'm not sure if the images currently loaded by egui are ever freed, even when the
 // underlying files they were loaded from are removed from the file system and stop being tracked
 // by the application.
@@ -31,6 +33,7 @@ use jpeg::{
 use eframe::egui;
 
 use std::{
+    num::NonZero,
     cmp::Ordering,
     collections::{HashMap, HashSet},
     io::prelude::*,
@@ -150,6 +153,7 @@ struct CostumeSaveFile {
     /// (if included) suffix.
     save_name: String,
     j2000_timestamp: Option<i64>,
+    image_texture: Option<egui::TextureHandle>,
 }
 
 #[allow(dead_code)]
@@ -166,17 +170,13 @@ impl CostumeSaveFile {
     // - resource type is "8BIM" (as a u32)
     // - resource id is 0x0404
     // - resource name is "\0\0" 
-    fn new_from_path(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let file_stem = path
-            .file_stem().unwrap()
-            .to_str().unwrap();
+    fn new(file_stem: &str, raw_bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
         if !file_stem.starts_with("Costume_") { return Err(Box::new(CostumeParseError::InvalidFileName)); }
         let j2000_timestamp = file_stem
             .split('_')
             .last().unwrap()
             .parse::<i64>().ok();
-        let jpeg_raw = fs::read(path)?;
-        let costume_jpeg = Jpeg::parse(jpeg_raw)?;
+        let costume_jpeg = Jpeg::parse(raw_bytes)?;
         let save_name = {
             let save_name_start = file_stem.find("_").unwrap();
             let save_name_end = if j2000_timestamp.is_some() { file_stem.rfind("_").unwrap() } else { file_stem.len() };
@@ -191,6 +191,7 @@ impl CostumeSaveFile {
             jpeg: costume_jpeg,
             save_name,
             j2000_timestamp,
+            image_texture: None,
         })
     }
 
@@ -255,12 +256,17 @@ impl CostumeSaveFile {
         let datasets = app13.get_datasets_mut(APP13_RECORD_APP, APP13_RECORD_APP_OBJECT_DATA_PREVIEW).unwrap();
         datasets[0].data = value.into_bytes().into_boxed_slice();
     }
-
 }
 
 enum UiMessage {
     /// We have detected that the file system has changed underneath us in some way.
     FileListChangedExternally,
+    JpegDecoded {
+        file_name: OsString,
+        width: u16,
+        height: u16,
+        pixels: Box<[u8]>,
+    },
 }
 
 #[derive(Default)]
@@ -392,6 +398,14 @@ impl eframe::App for App {
                     self.sorted_saves = saves.keys().cloned().collect();
                     Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
                 },
+
+                UiMessage::JpegDecoded { file_name, width, height, pixels } => {
+                    if saves.contains_key(&file_name) {
+                        let image = egui::ColorImage::from_rgb([width as usize, height as usize], &pixels);
+                        let texture_handle = ctx.load_texture(file_name.to_str().unwrap(), image, egui::TextureOptions::default());
+                        saves.get_mut(&file_name).unwrap().image_texture = Some(texture_handle);
+                    }
+                }
             }
         }
 
@@ -471,11 +485,16 @@ impl eframe::App for App {
                     let costume = saves.get(costume_file_name).unwrap();
                     let costume_edit = self.costume_edit.as_mut().unwrap();
 
-                    let file = format!("file://{}", costume_file_name.to_str().unwrap());
-                    let image = egui::Image::new(file.as_str())
-                        .maintain_aspect_ratio(true)
-                        .max_height(500.0);
-                    ui.add(image);
+                    if let Some(texture) = &costume.image_texture {
+                        let image = egui::Image::new(texture)
+                            .maintain_aspect_ratio(true)
+                            .max_height(500.0);
+                        ui.add(image);
+                    } else {
+                        ui.centered_and_justified(|ui| {
+                            ui.label("loading image...");
+                        });
+                    }
 
                     // FIXME we probably do not want to construct the file name every frame. Maybe
                     // cache it in the CostumeEdit struct itself?
@@ -709,9 +728,6 @@ impl eframe::App for App {
                         };
 
                         let selectable_costume_item = if self.show_images_in_selection_list {
-                            // FIXME if there are many images to display, the initial load hangs the
-                            // entire program!
-                            let file = format!("file://{}", save_file_name.to_str().unwrap());
                             // Create a selectable button that contains an image and some text beneath it.
                             let custom_button = ui.scope_builder(
                                 egui::UiBuilder::new().sense(egui::Sense::click() | egui::Sense::hover()),
@@ -735,7 +751,13 @@ impl eframe::App for App {
                                     prepped.content_ui.set_max_width(FRAME_SIZE.x);
                                     prepped.content_ui.set_min_size(FRAME_SIZE);
                                     prepped.content_ui.vertical(|ui| {
-                                        ui.add(egui::Image::new(file.as_str()).fit_to_exact_size(IMAGE_SIZE.into()));
+                                        if let Some(texture) = &save.image_texture {
+                                            ui.add(egui::Image::new(texture).fit_to_exact_size(IMAGE_SIZE.into()));
+                                        } else {
+                                            // TODO show a placeholder image
+                                            ui.label("loading...");
+                                        }
+
                                         ui.horizontal_wrapped(|ui| {
                                             let mut label_text = egui::RichText::new(display_name);
                                             if is_hovered {
@@ -858,6 +880,39 @@ fn main() {
             // thread doesn't run unnecessarily.
             let (scanner_tx, scanner_rx) = mpsc::channel::<SystemTime>();
 
+            const MAX_WORKERS: usize = 8;
+            let available_cores = thread::available_parallelism().map(NonZero::get).unwrap_or(MAX_WORKERS);
+            let num_workers = MAX_WORKERS.min(available_cores);
+            // TODO The things we're sending through the channel here are kind of big, maybe box them?
+            let (decode_job_tx, decode_job_rx) = mpsc::channel::<(OsString, Vec<u8>)>();
+            let decode_job_rx = Arc::new(Mutex::new(decode_job_rx));
+            // TODO gracefully handle thread shutdown when app is closing.
+            // workers for decoding
+            // let mut workers: Vec<thread::JoinHandle<()>> = Vec::with_capacity(num_workers);
+            for _id in 0..num_workers {
+                let decode_job_rx = Arc::clone(&decode_job_rx);
+                let ui_message_tx = ui_message_tx.clone();
+                let _join_handle = thread::spawn(move || {
+                    loop {
+                        let (file_name, jpeg_bytes) = decode_job_rx.lock().unwrap().recv().unwrap();
+                        let mut decoder = zune_jpeg::JpegDecoder::new(jpeg_bytes);
+                        // TODO when we implement logging, if this fails send to the UI as an error to display.
+                        if let Ok(pixels) = decoder.decode() {
+                            // TODO default if doesn't exist
+                            let info = decoder.info().expect("no jpeg info");
+                            _ = ui_message_tx.send(UiMessage::JpegDecoded {
+                                file_name,
+                                width: info.width,
+                                height: info.height,
+                                pixels: pixels.into()
+                            });
+                        }
+                    }
+                });
+                // workers.push(join_handle);
+            }
+
+
             // TODO maybe store some struct that contains the last modified date of the file and the
             // costume save metadata? Then if the file was modified underneath us we can reload it.
             // struct Something { last_modified: LastModifiedTimestamp, save: CostumeSaveFile }
@@ -866,6 +921,7 @@ fn main() {
             let saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>> = Arc::new(Mutex::new(HashMap::new()));
             egui_extras::install_image_loaders(&cc.egui_ctx);
 
+            // SCANNING THREAD
             {
                 let saves = Arc::clone(&saves);
                 let frame = cc.egui_ctx.clone();
@@ -893,8 +949,16 @@ fn main() {
                                 if saves.contains_key(&file_name) {
                                     missing_files.remove(&file_name);
                                     // TODO maybe log if we failed to parse the costume save?
-                                } else if let Ok(save) = CostumeSaveFile::new_from_path(Path::new(&file_name)) {
-                                    saves.insert(file_name, save);
+                                } else {
+                                    let file_stem = Path::new(&file_name).file_stem().unwrap().to_str().unwrap();
+                                    // FIXME log error to UI if we fail to read!
+                                    let jpeg_raw = fs::read(&file_name).expect("failed to read file");
+                                    if let Ok(save) = CostumeSaveFile::new(file_stem, &jpeg_raw) {
+                                        // This is just a shallow copy, which is exactly what we want here.
+                                        // TODO handle send error
+                                        _ = decode_job_tx.send((file_name.clone(), jpeg_raw));
+                                        saves.insert(file_name, save);
+                                    }
                                 }
                             }
                             for missing_file in missing_files {
