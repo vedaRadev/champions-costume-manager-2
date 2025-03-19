@@ -187,7 +187,6 @@ impl JpegApp13Payload {
 }
 
 // https://dev.exiv2.org/projects/exiv2/wiki/The_Metadata_in_JPEG_files
-#[derive(Clone)]
 pub struct JpegSegment {
     segment_type: JpegSegmentType,
     payload: Option<Box<[u8]>>,
@@ -201,14 +200,12 @@ impl JpegSegment {
     // and hope that the caller doesn't drop the guard or &T separately for some reason.
     pub fn get_payload_as<T: SegmentPayload>(&self) -> &T {
         let payload = self.payload.as_ref().unwrap();
-        let typed_payload = unsafe { &*(payload.as_ptr() as *const T) };
-        typed_payload
+        unsafe { &*(payload.as_ptr() as *const T) }
     }
 
     pub fn get_payload_as_mut<T: SegmentPayload>(&mut self) -> &mut T {
         let payload = self.payload.as_mut().unwrap();
-        let typed_payload = unsafe { &mut *(payload.as_ptr() as *mut T) };
-        typed_payload
+        unsafe { &mut *(payload.as_ptr() as *mut T) }
     }
 
     fn serialize(&self) -> Box<[u8]> {
@@ -329,7 +326,6 @@ impl From<std::io::Error> for ParseError {
     }
 }
 
-#[derive(Clone)]
 pub struct Jpeg {
     // TODO swap out the hashing function for something faster (default isn't great for small keys)
     segment_indices: HashMap<JpegSegmentType, Vec<usize>>,
@@ -459,7 +455,7 @@ impl Jpeg {
                     parsed.segments.push(JpegSegment {
                         segment_type,
                         payload: Some(payload),
-                        additional_data: Some(image_data.into_boxed_slice().into())
+                        additional_data: Some(image_data.into_boxed_slice())
                     });
                     parsed.segment_indices.entry(segment_type).and_modify(|v| v.push(index)).or_insert(vec![index]);
                 },
