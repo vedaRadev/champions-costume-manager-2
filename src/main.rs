@@ -258,15 +258,15 @@ impl CostumeSaveFile {
     }
 }
 
-enum UiMessage {
+/// Critical messages that must be handled as soon as possible
+enum UiPriorityMessage {
     /// We have detected that the file system has changed underneath us in some way.
     FileListChangedExternally,
-    JpegDecoded {
-        file_name: OsString,
-        width: u16,
-        height: u16,
-        pixels: Box<[u8]>,
-    },
+}
+
+/// Regular messages whose handling can be delayed for one or many frames
+enum UiMessage {
+    JpegDecoded { file_name: OsString, texture_handle: egui::TextureHandle },
 }
 
 #[derive(Default)]
@@ -292,7 +292,7 @@ struct App {
     saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>>,
     // TODO remove. Doesn't seem like we really have a need for the UI thread to send thread-safe
     // UI messages to itself.
-    ui_message_tx: mpsc::Sender<UiMessage>,
+    ui_priority_message_rx: mpsc::Receiver<UiPriorityMessage>,
     ui_message_rx: mpsc::Receiver<UiMessage>,
     scanner_tx: mpsc::Sender<SystemTime>,
 
@@ -314,14 +314,14 @@ impl App {
     fn new(
         _cc: &eframe::CreationContext,
         saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>>,
-        ui_message_tx: mpsc::Sender<UiMessage>,
+        ui_priority_message_rx: mpsc::Receiver<UiPriorityMessage>,
         ui_message_rx: mpsc::Receiver<UiMessage>,
         scanner_tx: mpsc::Sender<SystemTime>,
     ) -> Self
     {
         Self {
             saves,
-            ui_message_tx,
+            ui_priority_message_rx,
             ui_message_rx,
             scanner_tx,
 
@@ -384,9 +384,9 @@ impl eframe::App for App {
         let mut saves = self.saves.lock().unwrap();
         let current_modifiers = ctx.input(|input| input.modifiers);
 
-        while let Ok(notification) = self.ui_message_rx.try_recv() {
-            match notification {
-                UiMessage::FileListChangedExternally => {
+        while let Ok(priority_message) = self.ui_priority_message_rx.try_recv() {
+            match priority_message {
+                UiPriorityMessage::FileListChangedExternally => {
                     // The file(s) the user was viewing was removed or renamed
                     if self.selected_costumes.len() == 1 && saves.contains_key(&self.sorted_saves[*self.selected_costumes.iter().last().unwrap()])
                     || self.selected_costumes.len() > 1
@@ -398,11 +398,16 @@ impl eframe::App for App {
                     self.sorted_saves = saves.keys().cloned().collect();
                     Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
                 },
+            }
+        }
 
-                UiMessage::JpegDecoded { file_name, width, height, pixels } => {
+        const MAX_MESSAGES_PER_FRAME: usize = 32;
+        for _ in 0..MAX_MESSAGES_PER_FRAME {
+            let message = self.ui_message_rx.try_recv();
+            if message.is_err() { break; }
+            match message.unwrap() {
+                UiMessage::JpegDecoded { file_name, texture_handle } => {
                     if saves.contains_key(&file_name) {
-                        let image = egui::ColorImage::from_rgb([width as usize, height as usize], &pixels);
-                        let texture_handle = ctx.load_texture(file_name.to_str().unwrap(), image, egui::TextureOptions::default());
                         saves.get_mut(&file_name).unwrap().image_texture = Some(texture_handle);
                     }
                 }
@@ -876,6 +881,7 @@ fn main() {
         options,
         Box::new(|cc| {
             let (ui_message_tx, ui_message_rx) = mpsc::channel::<UiMessage>();
+            let (ui_priority_message_tx, ui_priority_message_rx) = mpsc::channel::<UiPriorityMessage>();
             // For the UI thread to communicate that it updated the filesystem so the scanner
             // thread doesn't run unnecessarily.
             let (scanner_tx, scanner_rx) = mpsc::channel::<SystemTime>();
@@ -892,6 +898,7 @@ fn main() {
             for _id in 0..num_workers {
                 let decode_job_rx = Arc::clone(&decode_job_rx);
                 let ui_message_tx = ui_message_tx.clone();
+                let ctx = cc.egui_ctx.clone();
                 let _join_handle = thread::spawn(move || {
                     loop {
                         let (file_name, jpeg_bytes) = decode_job_rx.lock().unwrap().recv().unwrap();
@@ -900,12 +907,9 @@ fn main() {
                         if let Ok(pixels) = decoder.decode() {
                             // TODO default if doesn't exist
                             let info = decoder.info().expect("no jpeg info");
-                            _ = ui_message_tx.send(UiMessage::JpegDecoded {
-                                file_name,
-                                width: info.width,
-                                height: info.height,
-                                pixels: pixels.into()
-                            });
+                            let image = egui::ColorImage::from_rgb([info.width as usize, info.height as usize], &pixels);
+                            let texture_handle = ctx.load_texture(file_name.to_str().unwrap(), image, egui::TextureOptions::default());
+                            _ = ui_message_tx.send(UiMessage::JpegDecoded { file_name, texture_handle });
                         }
                     }
                 });
@@ -925,7 +929,6 @@ fn main() {
             {
                 let saves = Arc::clone(&saves);
                 let frame = cc.egui_ctx.clone();
-                let ui_message_tx = ui_message_tx.clone();
                 thread::spawn(move || {
                     let mut last_modified_time: Option<SystemTime> = None;
                     loop {
@@ -964,7 +967,7 @@ fn main() {
                             for missing_file in missing_files {
                                 saves.remove(&missing_file);
                             }
-                            _ = ui_message_tx.send(UiMessage::FileListChangedExternally);
+                            _ = ui_priority_message_tx.send(UiPriorityMessage::FileListChangedExternally);
                             frame.request_repaint();
                         }
                         thread::sleep(Duration::from_millis(1000));
@@ -975,7 +978,7 @@ fn main() {
             Ok(Box::new(App::new(
                 cc,
                 saves,
-                ui_message_tx,
+                ui_priority_message_rx,
                 ui_message_rx,
                 scanner_tx,
             )))
