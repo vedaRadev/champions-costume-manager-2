@@ -134,7 +134,7 @@ pub const APP13_RECORD_APP_KEYWORD: u8 = 25;
 pub const APP13_RECORD_APP_CAPTION: u8 = 120;
 pub const APP13_RECORD_APP_OBJECT_DATA_PREVIEW: u8 = 202;
 
-#[repr(packed)]
+#[repr(Rust, packed)]
 #[allow(dead_code)]
 struct PackedIptcDatasetHeader {
     tag_marker: u8,
@@ -170,7 +170,7 @@ pub struct JpegApp13Payload {
 }
 
 fn to_iptc_dataset_key(record_number: u8, dataset_number: u8) -> u16 {
-    (record_number as u16) << 8 | dataset_number as u16
+    ((record_number as u16) << 8) | dataset_number as u16
 }
 
 impl JpegApp13Payload {
@@ -331,7 +331,6 @@ impl From<std::io::Error> for ParseError {
 }
 
 pub struct Jpeg {
-
     // TODO swap out the hashing function for something faster (default isn't great for small keys)
     segment_indices: HashMap<JpegSegmentType, Vec<usize>>,
     segments: Vec<JpegSegment>

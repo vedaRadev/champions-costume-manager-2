@@ -86,7 +86,7 @@ fn generate_costume_hash(costume_spec: &str) -> String {
         upper_bits += lower_bits;
     }
 
-    format!("7799{}\0", (upper_bits.0 as i32) << 16 | (lower_bits.0 as i32))
+    format!("7799{}\0", ((upper_bits.0 as i32) << 16) | (lower_bits.0 as i32))
 }
 
 fn get_in_game_display_name(account_name: &str, character_name: &str, timestamp: Option<i64>) -> String {
