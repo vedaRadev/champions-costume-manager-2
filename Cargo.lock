@@ -686,6 +686,7 @@ dependencies = [
  "eframe",
  "egui_extras",
  "image",
+ "zune-jpeg",
 ]
 
 [[package]]
