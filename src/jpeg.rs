@@ -2,7 +2,6 @@
 // TODO proper image decode of SOS segment
 use byteorder::{ ByteOrder, BigEndian };
 use std::collections::{ HashMap, BTreeMap };
-use std::sync::{ Arc, RwLock, RwLockReadGuard, RwLockWriteGuard };
 
 const JPEG_MARKER_SOI: u8 = 0xD8;
 const JPEG_MARKER_EOI: u8 = 0xD9;
@@ -191,25 +190,25 @@ impl JpegApp13Payload {
 #[derive(Clone)]
 pub struct JpegSegment {
     segment_type: JpegSegmentType,
-    payload: Option<Arc<RwLock<Box<[u8]>>>>,
+    payload: Option<Box<[u8]>>,
     // NOTE(RA): Currently no expectation that any additional data needs to be modified after load.
-    additional_data: Option<Arc<Box<[u8]>>>,
+    additional_data: Option<Box<[u8]>>,
 }
 
 // FIXME need to guard against the payload not matching the segment type!
 impl JpegSegment {
     // NOTE(RA): If these types get annoying, just return (RwLockReadGuard<Box<[u8]>>, &T) instead
     // and hope that the caller doesn't drop the guard or &T separately for some reason.
-    pub fn get_payload_as<T: SegmentPayload>(&self) -> (&T, RwLockReadGuard<Box<[u8]>>) {
-        let guard = self.payload.as_ref().unwrap().read().unwrap();
-        let typed_payload = unsafe { &*(guard.as_ptr() as *const T) };
-        (typed_payload, guard)
+    pub fn get_payload_as<T: SegmentPayload>(&self) -> &T {
+        let payload = self.payload.as_ref().unwrap();
+        let typed_payload = unsafe { &*(payload.as_ptr() as *const T) };
+        typed_payload
     }
 
-    pub fn get_payload_as_mut<T: SegmentPayload>(&mut self) -> (&mut T, RwLockWriteGuard<Box<[u8]>>) {
-        let guard = self.payload.as_mut().unwrap().write().unwrap();
-        let typed_payload = unsafe { &mut *(guard.as_ptr() as *mut T) };
-        (typed_payload, guard)
+    pub fn get_payload_as_mut<T: SegmentPayload>(&mut self) -> &mut T {
+        let payload = self.payload.as_mut().unwrap();
+        let typed_payload = unsafe { &mut *(payload.as_ptr() as *mut T) };
+        typed_payload
     }
 
     fn serialize(&self) -> Box<[u8]> {
@@ -226,7 +225,7 @@ impl JpegSegment {
             // to copy/write data might not be cache-friendly, so we'd need to make sure that it
             // really is better speed-wise and mem-wise).
             JpegSegmentType::APP13 => {
-                let (payload, _guard) = self.get_payload_as::<JpegApp13Payload>();
+                let payload = self.get_payload_as::<JpegApp13Payload>();
 
                 let mut serialized_datasets: Vec<u8> = Vec::new();
                 for (_, datasets) in payload.datasets.iter() {
@@ -266,7 +265,6 @@ impl JpegSegment {
 
             _ => {
                 if let Some(payload) = &self.payload {
-                    let payload = payload.read().unwrap();
                     serialized_segment.extend(((payload.len() + std::mem::size_of::<u16>()) as u16).to_be_bytes());
                     serialized_segment.extend(payload.iter().copied());
                 }
@@ -460,7 +458,7 @@ impl Jpeg {
                     let index = parsed.segments.len();
                     parsed.segments.push(JpegSegment {
                         segment_type,
-                        payload: Some(Arc::new(RwLock::new(payload))),
+                        payload: Some(payload),
                         additional_data: Some(image_data.into_boxed_slice().into())
                     });
                     parsed.segment_indices.entry(segment_type).and_modify(|v| v.push(index)).or_insert(vec![index]);
@@ -543,7 +541,6 @@ impl Jpeg {
                         datasets,
                     });
                     let payload = unsafe { Box::from_raw(std::slice::from_raw_parts_mut(Box::into_raw(payload) as *mut u8, std::mem::size_of::<JpegApp13Payload>())) };
-                    let payload = Arc::new(RwLock::new(payload));
 
                     let segment_type = JpegSegmentType::APP13;
                     let index = parsed.segments.len();
@@ -567,7 +564,7 @@ impl Jpeg {
                     let payload = if segment_payload_size > 0 {
                         let mut payload = vec![0u8; segment_payload_size as usize];
                         jpeg_raw.read_exact(&mut payload)?;
-                        Some(Arc::new(RwLock::new(payload.into_boxed_slice())))
+                        Some(payload.into_boxed_slice())
                     } else {
                         None
                     };
