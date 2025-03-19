@@ -6,6 +6,11 @@
 // too early then when we want to go through and harden the app by adding things like logging on
 // filesystem interaction failure, it might just make implementing it more of a nightmare.
 //
+// TODO Make the API for getting data from the CostumeSaveFile better. It's a bit messy right now
+// because every JpegApp13Payload access returns the data we want and an RwLockReadGuard.
+// Maybe it would be better to just lock the entire app13 payload and return that, then have some
+// methods that will get the individual fields out?
+//
 // FIXME I'm not sure if the images currently loaded by egui are ever freed, even when the
 // underlying files they were loaded from are removed from the file system and stop being tracked
 // by the application.
@@ -33,7 +38,7 @@ use std::{
     path::Path,
     env,
     fs,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Mutex, mpsc, RwLockReadGuard, RwLockWriteGuard},
     thread,
     time::{Duration, SystemTime},
 };
@@ -189,66 +194,64 @@ impl CostumeSaveFile {
         })
     }
 
-    fn get_app13_payload(&self) -> &JpegApp13Payload {
+    fn get_app13_payload(&self) -> (&JpegApp13Payload, RwLockReadGuard<Box<[u8]>>) {
         let app13_segment = self.jpeg.get_segment(JpegSegmentType::APP13).unwrap()[0];
-        let app13_payload = app13_segment.get_payload_as::<JpegApp13Payload>();
-        app13_payload
+        app13_segment.get_payload_as::<JpegApp13Payload>()
     }
 
-    fn get_app13_payload_mut(&mut self) -> &mut JpegApp13Payload {
+    fn get_app13_payload_mut(&mut self) -> (&mut JpegApp13Payload, RwLockWriteGuard<Box<[u8]>>) {
         let app13_segment = self.jpeg.get_segment_mut(JpegSegmentType::APP13).unwrap().swap_remove(0);
-        let app13_payload = app13_segment.get_payload_as_mut::<JpegApp13Payload>();
-        app13_payload
+        app13_segment.get_payload_as_mut::<JpegApp13Payload>()
     }
 
-    fn get_account_name(&self) -> &str {
-        let app13 = self.get_app13_payload();
+    fn get_account_name(&self) -> (&str, RwLockReadGuard<Box<[u8]>>) {
+        let (app13, guard) = self.get_app13_payload();
         let datasets = app13.get_datasets(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
         let result = unsafe { std::str::from_utf8_unchecked(&datasets[ACCOUNT_NAME_INDEX].data) };
-        result
+        (result, guard)
     }
 
     fn set_account_name(&mut self, value: String) {
-        let app13 = self.get_app13_payload_mut();
+        let (app13, _guard) = self.get_app13_payload_mut();
         let datasets = app13.get_datasets_mut(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
         datasets[ACCOUNT_NAME_INDEX].data = value.into_bytes().into_boxed_slice();
     }
 
-    fn get_character_name(&self) -> &str {
-        let app13 = self.get_app13_payload();
+    fn get_character_name(&self) -> (&str, RwLockReadGuard<Box<[u8]>>) {
+        let (app13, guard) = self.get_app13_payload();
         let datasets = app13.get_datasets(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
         let result = unsafe { std::str::from_utf8_unchecked(&datasets[CHARACTER_NAME_INDEX].data) };
-        result
+        (result, guard)
     }
 
     fn set_character_name(&mut self, value: String) {
-        let app13 = self.get_app13_payload_mut();
+        let (app13, _guard) = self.get_app13_payload_mut();
         let datasets = app13.get_datasets_mut(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
         datasets[CHARACTER_NAME_INDEX].data = value.into_bytes().into_boxed_slice();
     }
 
-    fn get_costume_hash(&self) -> &str {
-        let app13 = self.get_app13_payload();
+    fn get_costume_hash(&self) -> (&str, RwLockReadGuard<Box<[u8]>>) {
+        let (app13, guard) = self.get_app13_payload();
         let datasets = app13.get_datasets(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
         let result = unsafe { std::str::from_utf8_unchecked(&datasets[COSTUME_HASH_INDEX].data) };
-        result
+        (result, guard)
     }
 
     fn set_costume_hash(&mut self, value: String) {
-        let app13 = self.get_app13_payload_mut();
+        let (app13, _guard) = self.get_app13_payload_mut();
         let datasets = app13.get_datasets_mut(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
         datasets[COSTUME_HASH_INDEX].data = value.into_bytes().into_boxed_slice();
     }
 
-    fn get_costume_spec(&self) -> &str {
-        let app13 = self.get_app13_payload();
+    fn get_costume_spec(&self) -> (&str, RwLockReadGuard<Box<[u8]>>) {
+        let (app13, guard) = self.get_app13_payload();
         let datasets = app13.get_datasets(APP13_RECORD_APP, APP13_RECORD_APP_OBJECT_DATA_PREVIEW).unwrap();
         let result = unsafe { std::str::from_utf8_unchecked(&datasets[0].data) };
-        result
+        (result, guard)
     }
 
     fn set_costume_spec(&mut self, value: String) {
-        let app13 = self.get_app13_payload_mut();
+        let (app13, _guard) = self.get_app13_payload_mut();
         let datasets = app13.get_datasets_mut(APP13_RECORD_APP, APP13_RECORD_APP_OBJECT_DATA_PREVIEW).unwrap();
         datasets[0].data = value.into_bytes().into_boxed_slice();
     }
@@ -336,7 +339,9 @@ impl App {
                     DisplayType::DisplayName => {
                         keys_to_sort.sort_by_key(|k| {
                             let save = &locked_saves[k];
-                            get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp)
+                            let (account_name, _account_name_guard) = save.get_account_name();
+                            let (character_name, _character_name_guard) = save.get_character_name();
+                            get_in_game_display_name(account_name, character_name, save.j2000_timestamp)
                         });
                     },
 
@@ -414,8 +419,10 @@ impl eframe::App for App {
                     // toggling the checkbox on/off for some reason.
                     let save_idx = self.selected_costumes.iter().last().unwrap();
                     let save = &saves[&self.sorted_saves[*save_idx]];
-                    self.costume_edit.as_mut().unwrap().costume_spec = save.get_costume_spec().to_owned();
-                    self.costume_edit.as_mut().unwrap().costume_hash = save.get_costume_hash().to_owned();
+                    let (costume_spec, _costume_spec_guard) = save.get_costume_spec();
+                    let (costume_hash, _costume_hash_guard) = save.get_costume_hash();
+                    self.costume_edit.as_mut().unwrap().costume_spec = costume_spec.to_owned();
+                    self.costume_edit.as_mut().unwrap().costume_hash = costume_hash.to_owned();
                 }
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -693,7 +700,11 @@ impl eframe::App for App {
                         let save = &saves[save_file_name];
                         let is_selected = self.selected_costumes.contains(&idx);
                         let display_name = match self.display_type {
-                            DisplayType::DisplayName => get_in_game_display_name(save.get_account_name(), save.get_character_name(), save.j2000_timestamp),
+                            DisplayType::DisplayName => {
+                                let (account_name, _account_name_guard) = save.get_account_name();
+                                let (character_name, _character_name_guard) = save.get_character_name();
+                                get_in_game_display_name(account_name, character_name, save.j2000_timestamp)
+                            },
                             DisplayType::FileName => get_file_name(&save.save_name, save.j2000_timestamp),
                         };
 
@@ -790,11 +801,16 @@ impl eframe::App for App {
                             if self.selected_costumes.len() == 1 && self.selected_costumes.contains(&idx) {
                                 assert_eq!(*self.selected_costumes.iter().last().unwrap(), idx);
                                 let save_name = save.save_name.clone();
-                                let account_name = save.get_account_name().to_owned();
-                                let character_name = save.get_character_name().to_owned();
+                                let (account_name, _account_name_guard) = save.get_account_name();
+                                let (character_name, _character_name_guard) = save.get_character_name();
                                 let timestamp = save.j2000_timestamp;
-                                let costume_spec = save.get_costume_spec().to_owned();
-                                let costume_hash = save.get_costume_hash().to_owned();
+                                let (costume_spec, _costume_spec_guard) = save.get_costume_spec();
+                                let (costume_hash, _costume_hash_guard) = save.get_costume_hash();
+
+                                let account_name = account_name.to_owned();
+                                let character_name = character_name.to_owned();
+                                let costume_spec = costume_spec.to_owned();
+                                let costume_hash = costume_hash.to_owned();
 
                                 if let Some(costume_edit) = self.costume_edit.as_mut() {
                                     costume_edit.save_name = save_name;

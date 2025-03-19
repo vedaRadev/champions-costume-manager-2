@@ -3,7 +3,6 @@
 use byteorder::{ ByteOrder, BigEndian };
 use std::collections::{ HashMap, BTreeMap };
 use std::sync::{ Arc, RwLock, RwLockReadGuard, RwLockWriteGuard };
-use std::ops::{ Deref, DerefMut };
 
 const JPEG_MARKER_SOI: u8 = 0xD8;
 const JPEG_MARKER_EOI: u8 = 0xD9;
@@ -196,44 +195,20 @@ pub struct JpegSegment {
     additional_data: Option<Arc<Box<[u8]>>>,
 }
 
-pub struct LockedTypedPayload<'a, T> {
-    pub _guard: RwLockReadGuard<'a, Box<[u8]>>,
-    pub typed_payload: &'a T
-}
-
-impl<'a, T> Deref for LockedTypedPayload<'a, T> {
-    type Target = T;
-    fn deref(&self) -> &Self::Target { self.typed_payload }
-}
-
-pub struct LockedTypedPayloadMut<'a, T> {
-    _guard: RwLockWriteGuard<'a, Box<[u8]>>,
-    typed_payload: &'a mut T
-}
-
-impl<'a, T> Deref for LockedTypedPayloadMut<'a, T> {
-    type Target = T;
-    fn deref(&self) -> &Self::Target { self.typed_payload }
-}
-
-impl<'a, T> DerefMut for LockedTypedPayloadMut<'a, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target { self.typed_payload }
-}
-
 // FIXME need to guard against the payload not matching the segment type!
 impl JpegSegment {
     // NOTE(RA): If these types get annoying, just return (RwLockReadGuard<Box<[u8]>>, &T) instead
     // and hope that the caller doesn't drop the guard or &T separately for some reason.
-    pub fn get_payload_as<T: SegmentPayload>(&self) -> LockedTypedPayload<T> {
+    pub fn get_payload_as<T: SegmentPayload>(&self) -> (&T, RwLockReadGuard<Box<[u8]>>) {
         let guard = self.payload.as_ref().unwrap().read().unwrap();
         let typed_payload = unsafe { &*(guard.as_ptr() as *const T) };
-        LockedTypedPayload { _guard: guard, typed_payload }
+        (typed_payload, guard)
     }
 
-    pub fn get_payload_as_mut<T: SegmentPayload>(&mut self) -> LockedTypedPayloadMut<T> {
+    pub fn get_payload_as_mut<T: SegmentPayload>(&mut self) -> (&mut T, RwLockWriteGuard<Box<[u8]>>) {
         let guard = self.payload.as_mut().unwrap().write().unwrap();
         let typed_payload = unsafe { &mut *(guard.as_ptr() as *mut T) };
-        LockedTypedPayloadMut { _guard: guard, typed_payload }
+        (typed_payload, guard)
     }
 
     fn serialize(&self) -> Box<[u8]> {
@@ -250,7 +225,7 @@ impl JpegSegment {
             // to copy/write data might not be cache-friendly, so we'd need to make sure that it
             // really is better speed-wise and mem-wise).
             JpegSegmentType::APP13 => {
-                let payload = self.get_payload_as::<JpegApp13Payload>();
+                let (payload, _guard) = self.get_payload_as::<JpegApp13Payload>();
 
                 let mut serialized_datasets: Vec<u8> = Vec::new();
                 for (_, datasets) in payload.datasets.iter() {
