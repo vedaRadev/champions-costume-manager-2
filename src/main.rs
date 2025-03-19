@@ -1,3 +1,6 @@
+// TODO need to optimize for memory usage. We don't need EVERY image's texture loaded. We just need
+// to load the ones that the user is going see.
+//
 // TODO Once this is in a more stable state and prototyping is finished, run through and figure out
 // how to reduce the amount of cloning we're doing.
 //
