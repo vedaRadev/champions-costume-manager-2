@@ -376,8 +376,6 @@ impl App {
 }
 
 impl eframe::App for App {
-    // TODO once in-house jpeg image decoding (SOS) is implemented we can probably get rid of the
-    // image and maybe a few of the egui_extras dependencies
     // TODO Make a pass over this update function and figure out what kinds of things (if any)
     // should go through the UiMessage system. It was originally created so the UI can re-sort
     // whenever the scanning thread detects that files were added/removed underneath the GUI.
@@ -890,7 +888,6 @@ fn main() {
             const MAX_WORKERS: usize = 8;
             let available_cores = thread::available_parallelism().map(NonZero::get).unwrap_or(MAX_WORKERS);
             let num_workers = MAX_WORKERS.min(available_cores);
-            // TODO The things we're sending through the channel here are kind of big, maybe box them?
             let (decode_job_tx, decode_job_rx) = mpsc::channel::<(OsString, Vec<u8>)>();
             let decode_job_rx = Arc::new(Mutex::new(decode_job_rx));
             // TODO gracefully handle thread shutdown when app is closing.
@@ -958,7 +955,6 @@ fn main() {
                                     // FIXME log error to UI if we fail to read!
                                     let jpeg_raw = fs::read(&file_name).expect("failed to read file");
                                     if let Ok(save) = CostumeSaveFile::new(file_stem, &jpeg_raw) {
-                                        // This is just a shallow copy, which is exactly what we want here.
                                         // TODO handle send error
                                         _ = decode_job_tx.send((file_name.clone(), jpeg_raw));
                                         saves.insert(file_name, save);
