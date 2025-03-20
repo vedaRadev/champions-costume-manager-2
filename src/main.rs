@@ -293,8 +293,6 @@ enum SortType { Name, CreationTime, ModifiedTime }
 // TODO maybe tie the selected costume and costume edit together so they can never get out of sync?
 struct App {
     saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>>,
-    // TODO remove. Doesn't seem like we really have a need for the UI thread to send thread-safe
-    // UI messages to itself.
     ui_priority_message_rx: mpsc::Receiver<UiPriorityMessage>,
     ui_message_rx: mpsc::Receiver<UiMessage>,
     scanner_tx: mpsc::Sender<SystemTime>,
