@@ -196,8 +196,6 @@ pub struct JpegSegment {
 
 // FIXME need to guard against the payload not matching the segment type!
 impl JpegSegment {
-    // NOTE(RA): If these types get annoying, just return (RwLockReadGuard<Box<[u8]>>, &T) instead
-    // and hope that the caller doesn't drop the guard or &T separately for some reason.
     pub fn get_payload_as<T: SegmentPayload>(&self) -> &T {
         let payload = self.payload.as_ref().unwrap();
         unsafe { &*(payload.as_ptr() as *const T) }
