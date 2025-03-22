@@ -147,8 +147,13 @@ impl std::fmt::Display for CostumeParseError {
     }
 }
 
+enum CostumeImage {
+    NotLoaded,
+    Loading,
+    Loaded(egui::TextureHandle),
+}
+
 // TODO list:
-// * Caching of in-game display names, only recalc when changed to improve GUI perf.
 // * Maybe caching of file name as well (currently requires dynamic creation of string)?
 struct CostumeSaveFile {
     jpeg: Jpeg,
@@ -156,7 +161,11 @@ struct CostumeSaveFile {
     /// (if included) suffix.
     save_name: String,
     j2000_timestamp: Option<i64>,
-    image_texture: Option<egui::TextureHandle>,
+    // TODO Anything below this note is a field I have stuck into this struct without much thought.
+    // There is probably a better way to organize this data.
+    image_texture: CostumeImage,
+    image_visible_in_grid: bool,
+    image_visible_in_edit: bool,
 }
 
 #[allow(dead_code)]
@@ -194,7 +203,9 @@ impl CostumeSaveFile {
             jpeg: costume_jpeg,
             save_name,
             j2000_timestamp,
-            image_texture: None,
+            image_texture: CostumeImage::NotLoaded,
+            image_visible_in_grid: false,
+            image_visible_in_edit: false,
         })
     }
 
@@ -296,6 +307,7 @@ struct App {
     ui_priority_message_rx: mpsc::Receiver<UiPriorityMessage>,
     ui_message_rx: mpsc::Receiver<UiMessage>,
     scanner_tx: mpsc::Sender<SystemTime>,
+    decode_job_tx: mpsc::Sender<OsString>,
 
     file_exists_warning_modal_open: bool,
     show_images_in_selection_list: bool,
@@ -318,6 +330,7 @@ impl App {
         ui_priority_message_rx: mpsc::Receiver<UiPriorityMessage>,
         ui_message_rx: mpsc::Receiver<UiMessage>,
         scanner_tx: mpsc::Sender<SystemTime>,
+        decode_job_tx: mpsc::Sender<OsString>,
     ) -> Self
     {
         Self {
@@ -325,6 +338,7 @@ impl App {
             ui_priority_message_rx,
             ui_message_rx,
             scanner_tx,
+            decode_job_tx,
 
             file_exists_warning_modal_open: false,
             show_images_in_selection_list: false,
@@ -407,7 +421,7 @@ impl eframe::App for App {
             match message.unwrap() {
                 UiMessage::JpegDecoded { file_name, texture_handle } => {
                     if saves.contains_key(&file_name) {
-                        saves.get_mut(&file_name).unwrap().image_texture = Some(texture_handle);
+                        saves.get_mut(&file_name).unwrap().image_texture = CostumeImage::Loaded(texture_handle);
                     }
                 }
             }
@@ -486,18 +500,23 @@ impl eframe::App for App {
                 } else if self.selected_costumes.len() == 1 {
                     // FIXME probably ultimately unnecessary clone
                     let costume_file_name = &self.sorted_saves[*self.selected_costumes.iter().last().unwrap()].clone();
-                    let costume = saves.get(costume_file_name).unwrap();
+                    let costume = saves.get_mut(costume_file_name).unwrap();
                     let costume_edit = self.costume_edit.as_mut().unwrap();
 
-                    if let Some(texture) = &costume.image_texture {
+                    // TODO there's another place in the image grid where we do something very
+                    // similar to this. Maybe find a way to pull this logic out into a function?
+                    if let CostumeImage::Loaded(texture) = &costume.image_texture {
                         let image = egui::Image::new(texture)
                             .maintain_aspect_ratio(true)
                             .max_height(500.0);
                         ui.add(image);
                     } else {
-                        ui.centered_and_justified(|ui| {
-                            ui.label("loading image...");
-                        });
+                        if matches!(costume.image_texture, CostumeImage::NotLoaded) {
+                            // TODO log send error
+                            _ = self.decode_job_tx.send(costume_file_name.clone());
+                            costume.image_texture = CostumeImage::Loading;
+                        }
+                        ui.label("loading image...");
                     }
 
                     // FIXME we probably do not want to construct the file name every frame. Maybe
@@ -718,9 +737,10 @@ impl eframe::App for App {
                 };
 
                 let grid = egui::Grid::new("selection_grid").spacing(ITEM_SPACING);
+                let scroll_area_clip_rect = ui.clip_rect();
                 grid.show(ui, |ui| {
                     for (idx, save_file_name) in self.sorted_saves.iter().enumerate() {
-                        let save = &saves[save_file_name];
+                        let save = saves.get_mut(save_file_name).unwrap();
                         let is_selected = self.selected_costumes.contains(&idx);
                         let display_name = match self.display_type {
                             DisplayType::DisplayName => {
@@ -755,12 +775,14 @@ impl eframe::App for App {
                                     prepped.content_ui.set_max_width(FRAME_SIZE.x);
                                     prepped.content_ui.set_min_size(FRAME_SIZE);
                                     prepped.content_ui.vertical(|ui| {
-                                        if let Some(texture) = &save.image_texture {
+                                        // TODO there's another place in the edit panel where we do something very
+                                        // similar to this. Maybe find a way to pull this logic out into a function?
+                                        if let CostumeImage::Loaded(texture) = &save.image_texture {
                                             ui.add(egui::Image::new(texture).fit_to_exact_size(IMAGE_SIZE.into()));
                                         } else {
-                                            // TODO show a placeholder image
-                                            ui.label("loading...");
+                                            ui.label("loading image...");
                                         }
+
 
                                         ui.horizontal_wrapped(|ui| {
                                             let mut label_text = egui::RichText::new(display_name);
@@ -780,6 +802,13 @@ impl eframe::App for App {
 
                             if ((idx + 1) % num_cols) == 0 {
                                 ui.end_row();
+                            }
+
+                            save.image_visible_in_grid = scroll_area_clip_rect.intersects(custom_button.rect);
+                            if save.image_visible_in_grid && matches!(save.image_texture, CostumeImage::NotLoaded) {
+                                // TODO log send error
+                                _ = self.decode_job_tx.send(save_file_name.clone());
+                                save.image_texture = CostumeImage::Loading;
                             }
 
                             custom_button
@@ -859,6 +888,19 @@ impl eframe::App for App {
                                 }
                             }
                         }
+
+                        save.image_visible_in_edit = self.selected_costumes.len() == 1 && self.selected_costumes.contains(&idx);
+
+                        // Forget the texture if our image is loaded but not actually visible anywhere.
+                        // FIXME this is very aggressive forgetting. Maybe we only want to forget
+                        // if it hasn't been visible for some number of seconds?
+                        if let CostumeImage::Loaded(texture_handle) = &save.image_texture {
+                            if !save.image_visible_in_grid && !save.image_visible_in_edit {
+                                ctx.forget_image(&texture_handle.name());
+                                save.image_texture = CostumeImage::NotLoaded;
+                            }
+                        }
+
                     }
                 });
             });
@@ -888,7 +930,7 @@ fn main() {
             const MAX_WORKERS: usize = 8;
             let available_cores = thread::available_parallelism().map(NonZero::get).unwrap_or(MAX_WORKERS);
             let num_workers = MAX_WORKERS.min(available_cores);
-            let (decode_job_tx, decode_job_rx) = mpsc::channel::<(OsString, Vec<u8>)>();
+            let (decode_job_tx, decode_job_rx) = mpsc::channel::<OsString>();
             let decode_job_rx = Arc::new(Mutex::new(decode_job_rx));
             // TODO gracefully handle thread shutdown when app is closing.
             // workers for decoding
@@ -899,7 +941,20 @@ fn main() {
                 let ctx = cc.egui_ctx.clone();
                 let _join_handle = thread::spawn(move || {
                     loop {
-                        let (file_name, jpeg_bytes) = decode_job_rx.lock().unwrap().recv().unwrap();
+                        let file_name = decode_job_rx.lock().unwrap().recv().unwrap();
+                        // TODO
+                        // Instead of reading the file again, maybe we should just serialize the
+                        // costume and use _those_ bytes? The costume data is owned by a hashmap
+                        // behind a mutex though... Or maybe we need to store the CostumeSaveFiles
+                        // themselves behind an RwLock.
+                        let jpeg_bytes = match fs::read(&file_name) {
+                            Ok(bytes) => bytes,
+                            Err(_err) => {
+                                // TODO log read failure
+                                continue;
+                            }
+                        };
+
                         let mut decoder = zune_jpeg::JpegDecoder::new(jpeg_bytes);
                         // TODO when we implement logging, if this fails send to the UI as an error to display.
                         if let Ok(pixels) = decoder.decode() {
@@ -908,6 +963,7 @@ fn main() {
                             let image = egui::ColorImage::from_rgb([info.width as usize, info.height as usize], &pixels);
                             let texture_handle = ctx.load_texture(file_name.to_str().unwrap(), image, egui::TextureOptions::default());
                             _ = ui_message_tx.send(UiMessage::JpegDecoded { file_name, texture_handle });
+                            ctx.request_repaint();
                         }
                     }
                 });
@@ -955,8 +1011,6 @@ fn main() {
                                     // FIXME log error to UI if we fail to read!
                                     let jpeg_raw = fs::read(&file_name).expect("failed to read file");
                                     if let Ok(save) = CostumeSaveFile::new(file_stem, &jpeg_raw) {
-                                        // TODO handle send error
-                                        _ = decode_job_tx.send((file_name.clone(), jpeg_raw));
                                         saves.insert(file_name, save);
                                     }
                                 }
@@ -978,6 +1032,7 @@ fn main() {
                 ui_priority_message_rx,
                 ui_message_rx,
                 scanner_tx,
+                decode_job_tx,
             )))
         })
     );
