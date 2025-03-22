@@ -783,7 +783,6 @@ impl eframe::App for App {
                                             ui.label("loading image...");
                                         }
 
-
                                         ui.horizontal_wrapped(|ui| {
                                             let mut label_text = egui::RichText::new(display_name);
                                             if is_hovered {
@@ -813,6 +812,7 @@ impl eframe::App for App {
 
                             custom_button
                         } else {
+                            save.image_visible_in_grid = false;
                             let selectable_label = ui.selectable_label(is_selected, display_name);
                             ui.end_row();
                             selectable_label
