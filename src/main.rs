@@ -1,6 +1,3 @@
-// TODO need to optimize for memory usage. We don't need EVERY image's texture loaded. We just need
-// to load the ones that the user is going see.
-//
 // TODO Once this is in a more stable state and prototyping is finished, run through and figure out
 // how to reduce the amount of cloning we're doing.
 //
@@ -13,12 +10,6 @@
 // because every JpegApp13Payload access returns the data we want and an RwLockReadGuard.
 // Maybe it would be better to just lock the entire app13 payload and return that, then have some
 // methods that will get the individual fields out?
-//
-// TODO gracefully shut down threads on program exit
-//
-// FIXME I'm not sure if the images currently loaded by egui are ever freed, even when the
-// underlying files they were loaded from are removed from the file system and stop being tracked
-// by the application.
 //
 // AUDIT Should we use env::current_dir or share the costume dir across threads?
 
@@ -338,7 +329,6 @@ struct AppArgs {
 }
 
 impl App {
-    // TODO customization
     fn new(
         _cc: &eframe::CreationContext,
         AppArgs {
@@ -423,9 +413,6 @@ impl eframe::App for App {
         }
     }
 
-    // TODO Make a pass over this update function and figure out what kinds of things (if any)
-    // should go through the UiMessage system. It was originally created so the UI can re-sort
-    // whenever the scanning thread detects that files were added/removed underneath the GUI.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut saves = self.saves.lock().unwrap();
         let current_modifiers = ctx.input(|input| input.modifiers);
@@ -982,11 +969,10 @@ fn main() {
                         // TODO make sure that the RwLock is dropped after this "if" statement
                         if shutdown_flag.read().unwrap().load(atomic::Ordering::Acquire) { break; }
                         if let Ok(file_name) = decode_job_rx.lock().unwrap().recv_timeout(Duration::from_millis(10)) {
-                            // TODO
-                            // Instead of reading the file again, maybe we should just serialize the
-                            // costume and use _those_ bytes? The costume data is owned by a hashmap
-                            // behind a mutex though... Or maybe we need to store the CostumeSaveFiles
-                            // themselves behind an RwLock.
+                            // TODO Instead of reading the file again, maybe we should just
+                            // serialize the costume and use _those_ bytes? The costume data is
+                            // owned by a hashmap behind a mutex though... Or maybe we need to
+                            // store the CostumeSaveFiles themselves behind an RwLock.
                             let jpeg_bytes = match fs::read(&file_name) {
                                 Ok(bytes) => bytes,
                                 Err(_err) => {
