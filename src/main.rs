@@ -408,9 +408,9 @@ impl eframe::App for App {
         self.shutdown_flag.write().unwrap().store(true, atomic::Ordering::Release);
         // NOTE(RA): I think draining the vector like this is okay for now since we shouldn't
         // update again after handling this exit event.
-        while let Some(thread_handle) = self.support_thread_handles.pop() {
+        self.support_thread_handles.drain(..).for_each(|thread_handle| {
             thread_handle.join().unwrap();
-        }
+        });
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
