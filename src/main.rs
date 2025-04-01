@@ -44,7 +44,7 @@ use std::{
     path::Path,
     env,
     fs,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, RwLock, Mutex, atomic, mpsc},
     thread,
     time::{Duration, SystemTime},
 };
@@ -304,6 +304,11 @@ enum SortType { Name, CreationTime, ModifiedTime }
 // TODO maybe tie the selected costume and costume edit together so they can never get out of sync?
 struct App {
     saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>>,
+
+    // So that we can gracefully shut down all threads on exit
+    shutdown_flag: Arc<RwLock<atomic::AtomicBool>>,
+    support_thread_handles: Vec<thread::JoinHandle<()>>,
+
     ui_priority_message_rx: mpsc::Receiver<UiPriorityMessage>,
     ui_message_rx: mpsc::Receiver<UiMessage>,
     scanner_tx: mpsc::Sender<SystemTime>,
@@ -322,19 +327,37 @@ struct App {
     costume_edit: Option<CostumeEdit>,
 }
 
+struct AppArgs {
+    saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>>,
+    shutdown_flag: Arc<RwLock<atomic::AtomicBool>>,
+    support_thread_handles: Vec<thread::JoinHandle<()>>,
+    ui_priority_message_rx: mpsc::Receiver<UiPriorityMessage>,
+    ui_message_rx: mpsc::Receiver<UiMessage>,
+    scanner_tx: mpsc::Sender<SystemTime>,
+    decode_job_tx: mpsc::Sender<OsString>,
+}
+
 impl App {
     // TODO customization
     fn new(
         _cc: &eframe::CreationContext,
-        saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>>,
-        ui_priority_message_rx: mpsc::Receiver<UiPriorityMessage>,
-        ui_message_rx: mpsc::Receiver<UiMessage>,
-        scanner_tx: mpsc::Sender<SystemTime>,
-        decode_job_tx: mpsc::Sender<OsString>,
+        AppArgs {
+            saves,
+            shutdown_flag,
+            support_thread_handles,
+            ui_priority_message_rx,
+            ui_message_rx,
+            scanner_tx,
+            decode_job_tx,
+        }: AppArgs,
     ) -> Self
     {
         Self {
             saves,
+
+            shutdown_flag,
+            support_thread_handles,
+
             ui_priority_message_rx,
             ui_message_rx,
             scanner_tx,
@@ -390,6 +413,16 @@ impl App {
 }
 
 impl eframe::App for App {
+    // Gracefully shut down all our supporting threads.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.shutdown_flag.write().unwrap().store(true, atomic::Ordering::Release);
+        // NOTE(RA): I think draining the vector like this is okay for now since we shouldn't
+        // update again after handling this exit event.
+        while let Some(thread_handle) = self.support_thread_handles.pop() {
+            thread_handle.join().unwrap();
+        }
+    }
+
     // TODO Make a pass over this update function and figure out what kinds of things (if any)
     // should go through the UiMessage system. It was originally created so the UI can re-sort
     // whenever the scanning thread detects that files were added/removed underneath the GUI.
@@ -926,47 +959,57 @@ fn main() {
             // For the UI thread to communicate that it updated the filesystem so the scanner
             // thread doesn't run unnecessarily.
             let (scanner_tx, scanner_rx) = mpsc::channel::<SystemTime>();
+            // For the main app to signal graceful thread shutdown on exit
+            let shutdown_flag = Arc::new(RwLock::new(atomic::AtomicBool::new(false)));
+
+            let mut support_thread_handles: Vec<thread::JoinHandle<()>> = Vec::new();
 
             const MAX_WORKERS: usize = 8;
             let available_cores = thread::available_parallelism().map(NonZero::get).unwrap_or(MAX_WORKERS);
             let num_workers = MAX_WORKERS.min(available_cores);
             let (decode_job_tx, decode_job_rx) = mpsc::channel::<OsString>();
             let decode_job_rx = Arc::new(Mutex::new(decode_job_rx));
-            // TODO gracefully handle thread shutdown when app is closing.
+
             // workers for decoding
             // let mut workers: Vec<thread::JoinHandle<()>> = Vec::with_capacity(num_workers);
             for _id in 0..num_workers {
                 let decode_job_rx = Arc::clone(&decode_job_rx);
                 let ui_message_tx = ui_message_tx.clone();
+                let shutdown_flag = Arc::clone(&shutdown_flag);
                 let ctx = cc.egui_ctx.clone();
-                let _join_handle = thread::spawn(move || {
+                let decode_worker_handle = thread::spawn(move || {
                     loop {
-                        let file_name = decode_job_rx.lock().unwrap().recv().unwrap();
-                        // TODO
-                        // Instead of reading the file again, maybe we should just serialize the
-                        // costume and use _those_ bytes? The costume data is owned by a hashmap
-                        // behind a mutex though... Or maybe we need to store the CostumeSaveFiles
-                        // themselves behind an RwLock.
-                        let jpeg_bytes = match fs::read(&file_name) {
-                            Ok(bytes) => bytes,
-                            Err(_err) => {
-                                // TODO log read failure
-                                continue;
-                            }
-                        };
+                        // TODO make sure that the RwLock is dropped after this "if" statement
+                        if shutdown_flag.read().unwrap().load(atomic::Ordering::Acquire) { break; }
+                        if let Ok(file_name) = decode_job_rx.lock().unwrap().recv_timeout(Duration::from_millis(10)) {
+                            // TODO
+                            // Instead of reading the file again, maybe we should just serialize the
+                            // costume and use _those_ bytes? The costume data is owned by a hashmap
+                            // behind a mutex though... Or maybe we need to store the CostumeSaveFiles
+                            // themselves behind an RwLock.
+                            let jpeg_bytes = match fs::read(&file_name) {
+                                Ok(bytes) => bytes,
+                                Err(_err) => {
+                                    // TODO log read failure
+                                    continue;
+                                }
+                            };
 
-                        let mut decoder = zune_jpeg::JpegDecoder::new(jpeg_bytes);
-                        // TODO when we implement logging, if this fails send to the UI as an error to display.
-                        if let Ok(pixels) = decoder.decode() {
-                            // TODO default if doesn't exist
-                            let info = decoder.info().expect("no jpeg info");
-                            let image = egui::ColorImage::from_rgb([info.width as usize, info.height as usize], &pixels);
-                            let texture_handle = ctx.load_texture(file_name.to_str().unwrap(), image, egui::TextureOptions::default());
-                            _ = ui_message_tx.send(UiMessage::JpegDecoded { file_name, texture_handle });
-                            ctx.request_repaint();
+                            let mut decoder = zune_jpeg::JpegDecoder::new(jpeg_bytes);
+                            // TODO when we implement logging, if this fails send to the UI as an error to display.
+                            if let Ok(pixels) = decoder.decode() {
+                                // TODO default if doesn't exist
+                                let info = decoder.info().expect("no jpeg info");
+                                let image = egui::ColorImage::from_rgb([info.width as usize, info.height as usize], &pixels);
+                                let texture_handle = ctx.load_texture(file_name.to_str().unwrap(), image, egui::TextureOptions::default());
+                                _ = ui_message_tx.send(UiMessage::JpegDecoded { file_name, texture_handle });
+                                ctx.request_repaint();
+                            }
                         }
                     }
                 });
+
+                support_thread_handles.push(decode_worker_handle);
                 // workers.push(join_handle);
             }
 
@@ -982,10 +1025,14 @@ fn main() {
             // SCANNING THREAD
             {
                 let saves = Arc::clone(&saves);
+                let shutdown_flag = Arc::clone(&shutdown_flag);
                 let frame = cc.egui_ctx.clone();
-                thread::spawn(move || {
+                let scanner_handle = thread::spawn(move || {
                     let mut last_modified_time: Option<SystemTime> = None;
                     loop {
+                        // TODO make sure that the RwLock is dropped after this "if" statement
+                        if shutdown_flag.read().unwrap().load(atomic::Ordering::Acquire) { break; }
+
                         let current_dir = env::current_dir().unwrap();
                         let modified_time = fs::metadata(&current_dir).unwrap().modified().unwrap();
                         // If the UI initiated file system changes we need to know so that we don't
@@ -1021,19 +1068,24 @@ fn main() {
                             _ = ui_priority_message_tx.send(UiPriorityMessage::FileListChangedExternally);
                             frame.request_repaint();
                         }
-                        thread::sleep(Duration::from_millis(1000));
+                        thread::sleep(Duration::from_millis(250));
                     }
                 });
+
+                support_thread_handles.push(scanner_handle);
             }
 
-            Ok(Box::new(App::new(
-                cc,
+            let args = AppArgs {
                 saves,
+                shutdown_flag,
+                support_thread_handles,
                 ui_priority_message_rx,
                 ui_message_rx,
                 scanner_tx,
                 decode_job_tx,
-            )))
+            };
+
+            Ok(Box::new(App::new(cc, args)))
         })
     );
 }
