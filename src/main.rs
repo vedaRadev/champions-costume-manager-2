@@ -366,6 +366,8 @@ impl App {
         }
     }
 
+    // TODO Should we just clear our selected costumes in here? I think basically every time we
+    // sort we do that.
     fn sort_saves(sort_type: SortType, display_type: DisplayType, keys_to_sort: &mut [OsString], locked_saves: &std::sync::MutexGuard<HashMap<OsString, CostumeSaveFile>>) {
         match sort_type {
             SortType::Name => {
@@ -420,14 +422,11 @@ impl eframe::App for App {
         while let Ok(priority_message) = self.ui_priority_message_rx.try_recv() {
             match priority_message {
                 UiPriorityMessage::FileListChangedExternally => {
-                    // The file(s) the user was viewing was removed or renamed
-                    if self.selected_costumes.len() == 1 && saves.contains_key(&self.sorted_saves[*self.selected_costumes.iter().last().unwrap()])
-                    || self.selected_costumes.len() > 1
-                    {
-                        self.selected_costumes.clear();
-                        self.costume_edit = None;
-                    }
-
+                    // NOTE(RA): For now we're just going to reset selections whenever the file
+                    // list changes. Might change this later. We used to only do this whenever the
+                    // file(s) the user was viewing were removed from the file system.
+                    self.selected_costumes.clear();
+                    self.costume_edit = None;
                     self.sorted_saves = saves.keys().cloned().collect();
                     Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
                 },
@@ -714,26 +713,28 @@ impl eframe::App for App {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            let prev_display_type = self.display_type;
+            let prev_sort_type = self.sort_type;
             ui.horizontal(|ui| {
                 ui.label("Display:");
-                let display_name_button = ui.selectable_value(&mut self.display_type, DisplayType::DisplayName, "Display Name");
-                let file_name_button = ui.selectable_value(&mut self.display_type, DisplayType::FileName, "File Name");
-                if self.sort_type == SortType::Name && (display_name_button.clicked() || file_name_button.clicked()) {
-                    Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
-                }
+                ui.selectable_value(&mut self.display_type, DisplayType::DisplayName, "Display Name");
+                ui.selectable_value(&mut self.display_type, DisplayType::FileName, "File Name");
                 ui.checkbox(&mut self.show_images_in_selection_list, "Show Images");
             });
             ui.horizontal(|ui| {
                 ui.label("Sort:");
-                let name_button = ui.selectable_value(&mut self.sort_type, SortType::Name, "Name");
-                let creation_time_button = ui.selectable_value(&mut self.sort_type, SortType::CreationTime, "Creation Time");
-                let modified_time_button = ui.selectable_value(&mut self.sort_type, SortType::ModifiedTime, "Modified Time");
-                if name_button.clicked() || creation_time_button.clicked() || modified_time_button.clicked() {
-                    Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
-                }
+                ui.selectable_value(&mut self.sort_type, SortType::Name, "Name");
+                ui.selectable_value(&mut self.sort_type, SortType::CreationTime, "Creation Time");
+                ui.selectable_value(&mut self.sort_type, SortType::ModifiedTime, "Modified Time");
             });
-            ui.separator();
+            let sort_needed = self.sort_type != prev_sort_type || self.sort_type == SortType::Name && self.display_type != prev_display_type;
+            if sort_needed {
+                self.selected_costumes.clear();
+                self.selection_range_pivot = 0;
+                Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
+            }
 
+            ui.separator();
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let available_width = ui.available_width();
                 ui.set_width(available_width);
@@ -1049,6 +1050,7 @@ fn main() {
                                 }
                             }
                             for missing_file in missing_files {
+                                // TODO figure out if we need to explicitly forget image textures here.
                                 saves.remove(&missing_file);
                             }
                             _ = ui_priority_message_tx.send(UiPriorityMessage::FileListChangedExternally);
