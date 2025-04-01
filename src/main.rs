@@ -368,6 +368,9 @@ impl App {
 
     // TODO Should we just clear our selected costumes in here? I think basically every time we
     // sort we do that.
+    // FIXME We might need to support case-insensitive sorting on non-ascii characters, in which
+    // case we'll need to use to_lowercase(). Might require more cloning than is necessary, so
+    // maybe find a way to do that efficiently.
     fn sort_saves(sort_type: SortType, display_type: DisplayType, keys_to_sort: &mut [OsString], locked_saves: &std::sync::MutexGuard<HashMap<OsString, CostumeSaveFile>>) {
         match sort_type {
             SortType::Name => {
@@ -377,12 +380,12 @@ impl App {
                             let save = &locked_saves[k];
                             let account_name = save.get_account_name();
                             let character_name = save.get_character_name();
-                            get_in_game_display_name(account_name, character_name, save.j2000_timestamp)
+                            get_in_game_display_name(account_name, character_name, save.j2000_timestamp).to_ascii_lowercase()
                         });
                     },
 
                     DisplayType::FileName => {
-                        keys_to_sort.sort();
+                        keys_to_sort.sort_by_key(|k| k.to_ascii_lowercase());
                     },
                 }
             },
