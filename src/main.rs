@@ -1062,7 +1062,8 @@ fn main() {
                     loop {
                         // TODO make sure that the RwLock is dropped after this "if" statement
                         if shutdown_flag.read().unwrap().load(atomic::Ordering::Acquire) { break; }
-                        if let Ok(file_name) = decode_job_rx.lock().unwrap().recv_timeout(Duration::from_millis(32)) {
+                        let decode_job = decode_job_rx.lock().unwrap().recv_timeout(Duration::from_millis(32));
+                        if let Ok(file_name) = decode_job {
                             _ = ui_message_tx.send(UiMessage::Log(Log::new_now(format!("attempting to decode {:?}", file_name), LogLevel::Info, AppThread::Decode(id as u8))));
                             // TODO Instead of reading the file again, maybe we should just
                             // serialize the costume and use _those_ bytes? The costume data is
