@@ -12,6 +12,9 @@
 // methods that will get the individual fields out?
 //
 // AUDIT Should we use env::current_dir or share the costume dir across threads?
+//
+// AUDIT If _many_ logs are generated per frame then maybe we shouldn't be sending them through a
+// channel. Maybe we should just use an Arc<Mutex<...>>.
 
 mod jpeg;
 
@@ -27,9 +30,10 @@ use jpeg::{
 use eframe::egui;
 
 use std::{
+    fmt,
     num::NonZero,
     cmp::Ordering,
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     io::prelude::*,
     ffi::OsString,
     path::Path,
@@ -263,15 +267,92 @@ impl CostumeSaveFile {
     }
 }
 
+const MAX_LOGS: u16 = 1024;
+const MAX_DECODE_THREADS: usize = 8;
+
 /// Critical messages that must be handled as soon as possible
 enum UiPriorityMessage {
     /// We have detected that the file system has changed underneath us in some way.
     FileListChangedExternally,
 }
 
+enum LogLevel {
+    Info,
+    Warn,
+    Error,
+    Fatal,
+}
+
+impl LogLevel {
+    fn get_name(&self) -> &'static str {
+        match self {
+            Self::Info => "INFO",
+            Self::Warn => "WARN",
+            Self::Error => "ERROR",
+            Self::Fatal => "FATAL",
+        }
+    }
+}
+
+impl fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.get_name())
+    }
+}
+
+enum AppThread {
+    Ui,
+    Scanner,
+    Decode(u8),
+}
+
+const DECODE_THREAD_NAMES: [&str; MAX_DECODE_THREADS] = [
+    "DECODE 0", "DECODE 1", "DECODE 2", "DECODE 3",
+    "DECODE 4", "DECODE 5", "DECODE 6", "DECODE 7",
+];
+
+impl fmt::Display for AppThread {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let s = match *self {
+            Self::Ui => "UI",
+            Self::Scanner => "SCANNER",
+            Self::Decode(n) if (n as usize) < MAX_DECODE_THREADS => DECODE_THREAD_NAMES[n as usize],
+            Self::Decode(_) => "DECODE PAST MAX",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+struct Log {
+    level: LogLevel,
+    timestamp: chrono::NaiveDateTime,
+    source: AppThread,
+    message: String,
+}
+
+impl Log {
+    fn new_now(message: String, level: LogLevel, source: AppThread) -> Self {
+        let timestamp = chrono::Utc::now().naive_utc();
+        let message = format!(
+            "[{}] [{}] [{}] - {}",
+            level,
+            source,
+            timestamp.format("%Y-%m-%d %H:%M:%S%.6f"), // microsecond granularity
+            message,
+        );
+        Self {
+            message,
+            level,
+            source,
+            timestamp,
+        }
+    }
+}
+
 /// Regular messages whose handling can be delayed for one or many frames
 enum UiMessage {
     JpegDecoded { file_name: OsString, texture_handle: egui::TextureHandle },
+    Log(Log),
 }
 
 #[derive(Default)]
@@ -295,6 +376,8 @@ enum SortType { Name, CreationTime, ModifiedTime }
 // TODO maybe tie the selected costume and costume edit together so they can never get out of sync?
 struct App {
     saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>>,
+    /// List of logs with the oldest at the end and the newest at the front.
+    logs: VecDeque<Log>,
 
     // So that we can gracefully shut down all threads on exit
     shutdown_flag: Arc<RwLock<atomic::AtomicBool>>,
@@ -344,6 +427,7 @@ impl App {
     {
         Self {
             saves,
+            logs: VecDeque::with_capacity(MAX_LOGS as usize),
 
             shutdown_flag,
             support_thread_handles,
@@ -445,7 +529,14 @@ impl eframe::App for App {
                     if saves.contains_key(&file_name) {
                         saves.get_mut(&file_name).unwrap().image_texture = CostumeImage::Loaded(texture_handle);
                     }
-                }
+                },
+
+                // NOTE: If we have many logs generated per frame then maybe this should be a
+                // priority message so we can process more than MAX_MESSAGE_PER_FRAME of them.
+                UiMessage::Log(log) => {
+                    // TODO add to logs
+                    println!("{}", log.message);
+                },
             }
         }
 
@@ -955,15 +1046,14 @@ fn main() {
 
             let mut support_thread_handles: Vec<thread::JoinHandle<()>> = Vec::new();
 
-            const MAX_WORKERS: usize = 8;
-            let available_cores = thread::available_parallelism().map(NonZero::get).unwrap_or(MAX_WORKERS);
-            let num_workers = MAX_WORKERS.min(available_cores);
+            let available_cores = thread::available_parallelism().map(NonZero::get).unwrap_or(MAX_DECODE_THREADS);
+            let num_workers = MAX_DECODE_THREADS.min(available_cores);
             let (decode_job_tx, decode_job_rx) = mpsc::channel::<OsString>();
             let decode_job_rx = Arc::new(Mutex::new(decode_job_rx));
 
             // workers for decoding
             // let mut workers: Vec<thread::JoinHandle<()>> = Vec::with_capacity(num_workers);
-            for _id in 0..num_workers {
+            for id in 0..num_workers {
                 let decode_job_rx = Arc::clone(&decode_job_rx);
                 let ui_message_tx = ui_message_tx.clone();
                 let shutdown_flag = Arc::clone(&shutdown_flag);
@@ -972,7 +1062,8 @@ fn main() {
                     loop {
                         // TODO make sure that the RwLock is dropped after this "if" statement
                         if shutdown_flag.read().unwrap().load(atomic::Ordering::Acquire) { break; }
-                        if let Ok(file_name) = decode_job_rx.lock().unwrap().recv_timeout(Duration::from_millis(10)) {
+                        if let Ok(file_name) = decode_job_rx.lock().unwrap().recv_timeout(Duration::from_millis(32)) {
+                            _ = ui_message_tx.send(UiMessage::Log(Log::new_now(format!("attempting to decode {:?}", file_name), LogLevel::Info, AppThread::Decode(id as u8))));
                             // TODO Instead of reading the file again, maybe we should just
                             // serialize the costume and use _those_ bytes? The costume data is
                             // owned by a hashmap behind a mutex though... Or maybe we need to
@@ -992,6 +1083,7 @@ fn main() {
                                 let info = decoder.info().expect("no jpeg info");
                                 let image = egui::ColorImage::from_rgb([info.width as usize, info.height as usize], &pixels);
                                 let texture_handle = ctx.load_texture(file_name.to_str().unwrap(), image, egui::TextureOptions::default());
+                                _ = ui_message_tx.send(UiMessage::Log(Log::new_now(format!("decoded {:?}", file_name), LogLevel::Info, AppThread::Decode(id as u8))));
                                 _ = ui_message_tx.send(UiMessage::JpegDecoded { file_name, texture_handle });
                                 ctx.request_repaint();
                             }
