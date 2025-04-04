@@ -39,7 +39,7 @@ use std::{
     path::Path,
     env,
     fs,
-    sync::{Arc, RwLock, Mutex, atomic, mpsc},
+    sync::{Arc, Mutex, atomic, mpsc},
     thread,
     time::{Duration, SystemTime},
 };
@@ -380,7 +380,7 @@ struct App {
     logs: VecDeque<Log>,
 
     // So that we can gracefully shut down all threads on exit
-    shutdown_flag: Arc<RwLock<atomic::AtomicBool>>,
+    shutdown_flag: Arc<atomic::AtomicBool>,
     support_thread_handles: Vec<thread::JoinHandle<()>>,
 
     ui_priority_message_rx: mpsc::Receiver<UiPriorityMessage>,
@@ -403,7 +403,7 @@ struct App {
 
 struct AppArgs {
     saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>>,
-    shutdown_flag: Arc<RwLock<atomic::AtomicBool>>,
+    shutdown_flag: Arc<atomic::AtomicBool>,
     support_thread_handles: Vec<thread::JoinHandle<()>>,
     ui_priority_message_rx: mpsc::Receiver<UiPriorityMessage>,
     ui_message_rx: mpsc::Receiver<UiMessage>,
@@ -494,7 +494,7 @@ impl App {
 impl eframe::App for App {
     // Gracefully shut down all our supporting threads.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.shutdown_flag.write().unwrap().store(true, atomic::Ordering::Release);
+        self.shutdown_flag.store(true, atomic::Ordering::Release);
         // NOTE(RA): I think draining the vector like this is okay for now since we shouldn't
         // update again after handling this exit event.
         self.support_thread_handles.drain(..).for_each(|thread_handle| {
@@ -1042,7 +1042,7 @@ fn main() {
             // thread doesn't run unnecessarily.
             let (scanner_tx, scanner_rx) = mpsc::channel::<SystemTime>();
             // For the main app to signal graceful thread shutdown on exit
-            let shutdown_flag = Arc::new(RwLock::new(atomic::AtomicBool::new(false)));
+            let shutdown_flag = Arc::new(atomic::AtomicBool::new(false));
 
             let mut support_thread_handles: Vec<thread::JoinHandle<()>> = Vec::new();
 
@@ -1061,7 +1061,7 @@ fn main() {
                 let decode_worker_handle = thread::spawn(move || {
                     loop {
                         // TODO make sure that the RwLock is dropped after this "if" statement
-                        if shutdown_flag.read().unwrap().load(atomic::Ordering::Acquire) { break; }
+                        if shutdown_flag.load(atomic::Ordering::Acquire) { break; }
                         let decode_job = decode_job_rx.lock().unwrap().recv_timeout(Duration::from_millis(32));
                         if let Ok(file_name) = decode_job {
                             _ = ui_message_tx.send(UiMessage::Log(Log::new_now(format!("attempting to decode {:?}", file_name), LogLevel::Info, AppThread::Decode(id as u8))));
@@ -1114,7 +1114,7 @@ fn main() {
                     let mut last_modified_time: Option<SystemTime> = None;
                     loop {
                         // TODO make sure that the RwLock is dropped after this "if" statement
-                        if shutdown_flag.read().unwrap().load(atomic::Ordering::Acquire) { break; }
+                        if shutdown_flag.load(atomic::Ordering::Acquire) { break; }
 
                         let current_dir = env::current_dir().unwrap();
                         let modified_time = fs::metadata(&current_dir).unwrap().modified().unwrap();
