@@ -1112,7 +1112,7 @@ fn main() {
                 let decode_worker_handle = thread::spawn(move || {
                     loop {
                         if shutdown_flag.load(atomic::Ordering::Acquire) { break; }
-                        let decode_job = decode_job_rx.lock().unwrap().recv_timeout(Duration::from_millis(32));
+                        let decode_job = decode_job_rx.lock().unwrap().recv_timeout(Duration::from_millis(8));
                         if let Ok(file_name) = decode_job {
                             logger.log(LogLevel::Info, format!("attempting to decode {:?}", file_name).as_str());
                             // TODO Instead of reading the file again, maybe we should just
@@ -1210,7 +1210,8 @@ fn main() {
                             _ = ui_priority_message_tx.send(UiPriorityMessage::FileListChangedExternally);
                             frame.request_repaint();
                         }
-                        thread::sleep(Duration::from_millis(250));
+
+                        thread::sleep(Duration::from_millis(32));
                     }
 
                     logger.log(LogLevel::Info, "shutting down");
