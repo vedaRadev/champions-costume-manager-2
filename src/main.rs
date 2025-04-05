@@ -39,7 +39,7 @@ use std::{
     path::Path,
     env,
     fs,
-    sync::{Arc, Mutex, atomic, mpsc},
+    sync::{Arc, Mutex, RwLock, atomic, mpsc, LazyLock},
     thread,
     time::{Duration, SystemTime},
 };
@@ -268,7 +268,6 @@ impl CostumeSaveFile {
 }
 
 const MAX_LOGS: u16 = 1024;
-const MAX_DECODE_THREADS: usize = 8;
 
 /// Critical messages that must be handled as soon as possible
 enum UiPriorityMessage {
@@ -300,38 +299,15 @@ impl fmt::Display for LogLevel {
     }
 }
 
-enum AppThread {
-    Ui,
-    Scanner,
-    Decode(u8),
-}
-
-const DECODE_THREAD_NAMES: [&str; MAX_DECODE_THREADS] = [
-    "DECODE 0", "DECODE 1", "DECODE 2", "DECODE 3",
-    "DECODE 4", "DECODE 5", "DECODE 6", "DECODE 7",
-];
-
-impl fmt::Display for AppThread {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let s = match *self {
-            Self::Ui => "UI",
-            Self::Scanner => "SCANNER",
-            Self::Decode(n) if (n as usize) < MAX_DECODE_THREADS => DECODE_THREAD_NAMES[n as usize],
-            Self::Decode(_) => "DECODE PAST MAX",
-        };
-        write!(f, "{}", s)
-    }
-}
-
 struct Log {
     level: LogLevel,
     timestamp: chrono::NaiveDateTime,
-    source: AppThread,
+    source: &'static str,
     message: String,
 }
 
 impl Log {
-    fn new_now(message: String, level: LogLevel, source: AppThread) -> Self {
+    fn new_now(level: LogLevel, message: &str, source: &'static str) -> Self {
         let timestamp = chrono::Utc::now().naive_utc();
         let message = format!(
             "[{}] [{}] [{}] - {}",
@@ -349,10 +325,59 @@ impl Log {
     }
 }
 
+struct Logger {
+    /// List of logs with the oldest at the end and the newest at the front.
+    logs: VecDeque<Log>,
+    max_logs: u16,
+}
+
+impl Logger {
+    fn new(max_logs: u16) -> Self {
+        Self {
+            logs: VecDeque::with_capacity(max_logs as usize),
+            max_logs,
+        }
+    }
+}
+
+type SharedLogger = Arc<RwLock<Logger>>;
+
+struct GlobalLogger(SharedLogger);
+
+struct LoggerHandle {
+    thread_id: &'static str,
+    logger: SharedLogger,
+}
+
+impl GlobalLogger {
+    fn new_handle(&self, thread_id: &'static str) -> LoggerHandle {
+        LoggerHandle {
+            logger: Arc::clone(&self.0),
+            thread_id,
+        }
+    }
+}
+
+impl LoggerHandle {
+    fn log(&self, level: LogLevel, message: &str) {
+        let log = Log::new_now(level, message, self.thread_id);
+        if let Ok(mut logger) = self.logger.write() {
+            // TODO remove, debugging only
+            // Or maybe find a way to also print logs only if the console is running
+            println!("{}", log.message);
+            if logger.logs.len() == logger.max_logs.into() {
+                logger.logs.pop_back();
+            }
+            logger.logs.push_front(log);
+        }
+    }
+}
+
+static LOGGER: LazyLock<GlobalLogger> = LazyLock::new(|| GlobalLogger(Arc::new(RwLock::new(Logger::new(MAX_LOGS)))));
+
 /// Regular messages whose handling can be delayed for one or many frames
 enum UiMessage {
     JpegDecoded { file_name: OsString, texture_handle: egui::TextureHandle },
-    Log(Log),
 }
 
 #[derive(Default)]
@@ -376,8 +401,8 @@ enum SortType { Name, CreationTime, ModifiedTime }
 // TODO maybe tie the selected costume and costume edit together so they can never get out of sync?
 struct App {
     saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>>,
-    /// List of logs with the oldest at the end and the newest at the front.
-    logs: VecDeque<Log>,
+
+    logger: LoggerHandle,
 
     // So that we can gracefully shut down all threads on exit
     shutdown_flag: Arc<atomic::AtomicBool>,
@@ -409,6 +434,7 @@ struct AppArgs {
     ui_message_rx: mpsc::Receiver<UiMessage>,
     scanner_tx: mpsc::Sender<SystemTime>,
     decode_job_tx: mpsc::Sender<OsString>,
+    logger: LoggerHandle,
 }
 
 impl App {
@@ -422,12 +448,14 @@ impl App {
             ui_message_rx,
             scanner_tx,
             decode_job_tx,
+            logger,
         }: AppArgs,
     ) -> Self
     {
         Self {
             saves,
-            logs: VecDeque::with_capacity(MAX_LOGS as usize),
+
+            logger,
 
             shutdown_flag,
             support_thread_handles,
@@ -494,12 +522,14 @@ impl App {
 impl eframe::App for App {
     // Gracefully shut down all our supporting threads.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.logger.log(LogLevel::Info, "signalling shutdown");
         self.shutdown_flag.store(true, atomic::Ordering::Release);
         // NOTE(RA): I think draining the vector like this is okay for now since we shouldn't
         // update again after handling this exit event.
         self.support_thread_handles.drain(..).for_each(|thread_handle| {
             thread_handle.join().unwrap();
         });
+        self.logger.log(LogLevel::Info, "shutdown complete");
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -529,13 +559,6 @@ impl eframe::App for App {
                     if saves.contains_key(&file_name) {
                         saves.get_mut(&file_name).unwrap().image_texture = CostumeImage::Loaded(texture_handle);
                     }
-                },
-
-                // NOTE: If we have many logs generated per frame then maybe this should be a
-                // priority message so we can process more than MAX_MESSAGE_PER_FRAME of them.
-                UiMessage::Log(log) => {
-                    // TODO add to logs
-                    println!("{}", log.message);
                 },
             }
         }
@@ -625,7 +648,7 @@ impl eframe::App for App {
                         ui.add(image);
                     } else {
                         if matches!(costume.image_texture, CostumeImage::NotLoaded) {
-                            // TODO log send error
+                            // TODO log and send error
                             _ = self.decode_job_tx.send(costume_file_name.clone());
                             costume.image_texture = CostumeImage::Loading;
                         }
@@ -688,94 +711,113 @@ impl eframe::App for App {
                         if file_name_changed && saves.contains_key(&new_file_name) {
                             self.file_exists_warning_modal_open = true;
                         } else {
-                            let costume = saves.get_mut(costume_file_name).unwrap();
-                            let mut temp_file = fs::File::create(&temp_file_name).unwrap_or_else(|err| {
-                                eprintln!("Failed to open {:?} for writing: {err}", temp_file_name);
-                                std::process::exit(1);
-                            });
+                            self.logger.log(LogLevel::Info, format!("attempting to save {old_file_name:?} as {new_file_name:?}").as_str());
+                            // TODO Create a SaveError type, map all errors in this block to that
+                            // and include additional information about the failed operation, and
+                            // just use the `?` operator. Return a result and log if there's an
+                            // error afterward.
+                            (|| {
+                                let costume = saves.get_mut(costume_file_name).unwrap();
+                                let mut temp_file = match fs::File::create(&temp_file_name) {
+                                    Ok(file) => file,
+                                    Err(err) => {
+                                        self.logger.log(LogLevel::Error, format!("Failed to open temp file {temp_file_name:?}: {err}").as_str());
+                                        return;
+                                    }
+                                };
 
-                            costume.set_account_name(costume_edit.account_name.clone());
-                            costume.set_character_name(costume_edit.character_name.clone());
-                            costume.set_costume_spec(costume_edit.costume_spec.clone());
-                            costume.set_costume_hash(costume_edit.costume_hash.clone());
-                            let serialized = costume.jpeg.serialize();
+                                costume.set_account_name(costume_edit.account_name.clone());
+                                costume.set_character_name(costume_edit.character_name.clone());
+                                costume.set_costume_spec(costume_edit.costume_spec.clone());
+                                costume.set_costume_hash(costume_edit.costume_hash.clone());
+                                let serialized = costume.jpeg.serialize();
 
-                            if let Err(err) = temp_file.write_all(&serialized) {
-                                eprintln!("failed to write to file {:?}: {err}", temp_file_name);
-                                std::process::exit(1);
-                            } else {
-                                println!("wrote to {:?}", temp_file_name);
-                            }
-
-                            if file_name_changed {
-                                costume.save_name = costume_edit.save_name.clone();
-                                costume.j2000_timestamp = costume_edit.timestamp;
-                            }
-
-                            // Need to copy old creation time to new file
-                            #[cfg(windows)]
-                            {
-                                use std::os::windows::fs::FileTimesExt;
-                                let old_file = fs::File::open(old_file_name).unwrap_or_else(|err| {
-                                    eprintln!("failed to open original file {:?} for reading: {err}", old_file_name);
-                                    std::process::exit(1);
-                                });
-                                let old_metadata = old_file.metadata().unwrap_or_else(|err| {
-                                    eprintln!("failed to get metadata for original file {:?}: {err}", old_file_name);
-                                    std::process::exit(1);
-                                });
-                                let new_metadata = temp_file.metadata().unwrap_or_else(|err| {
-                                    eprintln!("failed to get metadata for new file {new_file_name:?}: {err}");
-                                    std::process::exit(1);
-                                });
-                                // SAFETY: This section is conditionally compiled for windows so
-                                // setting/getting the file creation time should not error.
-                                let times = fs::FileTimes::new()
-                                    .set_created(old_metadata.created().unwrap())
-                                    .set_accessed(new_metadata.accessed().unwrap())
-                                    .set_modified(new_metadata.modified().unwrap());
-                                if let Err(err) = temp_file.set_times(times) {
-                                    eprintln!("failed to update filetimes for {temp_file_name:?}: {err}");
-                                    std::process::exit(1);
+                                if let Err(err) = temp_file.write_all(&serialized) {
+                                    self.logger.log(LogLevel::Error, format!("failed to write temp file {temp_file_name:?}: {err}").as_str());
+                                    return;
                                 }
-                            }
 
-                            if let Err(err) = fs::remove_file(old_file_name) {
-                                eprintln!("failed to remove original file {old_file_name:?}: {err}");
-                                std::process::exit(1);
-                            }
+                                if file_name_changed {
+                                    costume.save_name = costume_edit.save_name.clone();
+                                    costume.j2000_timestamp = costume_edit.timestamp;
+                                }
 
-                            if let Err(err) = fs::rename(temp_file_name, &new_file_name) {
-                                eprintln!("failed to rename temp file: {err}");
-                                std::process::exit(1);
-                            }
+                                // Need to copy old creation time to new file
+                                #[cfg(windows)]
+                                {
+                                    use std::os::windows::fs::FileTimesExt;
+                                    let old_file = match fs::File::open(old_file_name) {
+                                        Ok(file) => file,
+                                        Err(err) => {
+                                            self.logger.log(LogLevel::Error, format!("failed to open original file {old_file_name:?} for reading: {err}").as_str());
+                                            return;
+                                        }
+                                    };
+                                    let old_metadata = match old_file.metadata() {
+                                        Ok(metadata) => metadata,
+                                        Err(err) => {
+                                            self.logger.log(LogLevel::Error, format!("failed to get metadata for original file {old_file_name:?}: {err}").as_str());
+                                            return;
+                                        },
+                                    };
+                                    let new_metadata = match temp_file.metadata() {
+                                        Ok(metadata) => metadata,
+                                        Err(err) => {
+                                            self.logger.log(LogLevel::Error, format!("failed to get metadata for new file {new_file_name:?}: {err}").as_str());
+                                            return;
+                                        },
+                                    };
+                                    // SAFETY: This section is conditionally compiled for windows so
+                                    // setting/getting the file creation time should not error.
+                                    let times = fs::FileTimes::new()
+                                        .set_created(old_metadata.created().unwrap())
+                                        .set_accessed(new_metadata.accessed().unwrap())
+                                        .set_modified(new_metadata.modified().unwrap());
+                                    if let Err(err) = temp_file.set_times(times) {
+                                        self.logger.log(LogLevel::Error, format!("failed to update filetimes for {temp_file_name:?}: {err}").as_str());
+                                        return;
+                                    }
+                                }
 
-                            // FIXME really lazy and inefficient. I don't think we can know where the new
-                            // save name will be after sorting (maybe we actually can) but we can probably
-                            // pass along the index of the old save with this event. Would eliminate an
-                            // entire scan through the sorted_saves array.
-                            let (old_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| *save == old_file_name).unwrap();
-                            assert!(self.selected_costumes.remove(&old_index));
+                                if let Err(err) = fs::remove_file(old_file_name) {
+                                    self.logger.log(LogLevel::Error, format!("failed to remove original file {old_file_name:?}: {err}").as_str());
+                                    return;
+                                }
 
-                            let save = saves.remove(old_file_name).unwrap();
-                            saves.insert(new_file_name.clone(), save);
-                            self.sorted_saves = saves.keys().cloned().collect();
-                            Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
+                                if let Err(err) = fs::rename(temp_file_name, &new_file_name) {
+                                    self.logger.log(LogLevel::Error, format!("failed to rename temp file: {err}").as_str());
+                                    return;
+                                }
 
-                            let (new_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| **save == new_file_name).unwrap();
-                            self.selected_costumes.insert(new_index);
+                                self.logger.log(LogLevel::Info, format!("successfully saved {new_file_name:?}").as_str());
 
-                            // TODO find a way to compress this code since we do the exact same thing when
-                            // deleting files.
+                                // FIXME really lazy and inefficient. I don't think we can know where the new
+                                // save name will be after sorting (maybe we actually can) but we can probably
+                                // pass along the index of the old save with this event. Would eliminate an
+                                // entire scan through the sorted_saves array.
+                                let (old_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| *save == old_file_name).unwrap();
+                                assert!(self.selected_costumes.remove(&old_index));
 
-                            // Signal to the scanning thread that we initiated the file system change.
-                            // This avoids cases where we update the file system, react to the update,
-                            // then the scanner sees that something was changed and gives us ANOTHER
-                            // notification that the file system was changed.
-                            let current_dir = env::current_dir().unwrap();
-                            let last_modified_time = fs::metadata(&current_dir).unwrap().modified().unwrap();
-                            // TODO log failure
-                            let _ = self.scanner_tx.send(last_modified_time);
+                                let save = saves.remove(old_file_name).unwrap();
+                                saves.insert(new_file_name.clone(), save);
+                                self.sorted_saves = saves.keys().cloned().collect();
+                                Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
+
+                                let (new_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| **save == new_file_name).unwrap();
+                                self.selected_costumes.insert(new_index);
+
+                                // TODO find a way to compress this code since we do the exact same thing when
+                                // deleting files.
+
+                                // Signal to the scanning thread that we initiated the file system change.
+                                // This avoids cases where we update the file system, react to the update,
+                                // then the scanner sees that something was changed and gives us ANOTHER
+                                // notification that the file system was changed.
+                                let current_dir = env::current_dir().unwrap();
+                                let last_modified_time = fs::metadata(&current_dir).unwrap().modified().unwrap();
+                                // TODO log failure
+                                let _ = self.scanner_tx.send(last_modified_time);
+                            })();
                         }
                     }
                 }
@@ -784,7 +826,10 @@ impl eframe::App for App {
                     // TODO show delete confirmation popup
                     for selected_idx in self.selected_costumes.iter() {
                         let costume_file_name = &self.sorted_saves[*selected_idx];
-                        fs::remove_file(costume_file_name).expect("Failed to delete file");
+                        if let Err(err) = fs::remove_file(costume_file_name) {
+                            self.logger.log(LogLevel::Error, format!("failed to delete {costume_file_name:?}: {err}").as_str());
+                            continue;
+                        }
                         saves.remove(costume_file_name);
                     }
                     self.sorted_saves = saves.keys().cloned().collect();
@@ -1046,33 +1091,40 @@ fn main() {
 
             let mut support_thread_handles: Vec<thread::JoinHandle<()>> = Vec::new();
 
+            const MAX_DECODE_THREADS: usize = 8;
+            const DECODE_THREAD_NAMES: [&str; MAX_DECODE_THREADS] = [
+                "DECODE 0", "DECODE 1", "DECODE 2", "DECODE 3",
+                "DECODE 4", "DECODE 5", "DECODE 6", "DECODE 7",
+            ];
+
             let available_cores = thread::available_parallelism().map(NonZero::get).unwrap_or(MAX_DECODE_THREADS);
             let num_workers = MAX_DECODE_THREADS.min(available_cores);
             let (decode_job_tx, decode_job_rx) = mpsc::channel::<OsString>();
             let decode_job_rx = Arc::new(Mutex::new(decode_job_rx));
 
             // workers for decoding
-            // let mut workers: Vec<thread::JoinHandle<()>> = Vec::with_capacity(num_workers);
-            for id in 0..num_workers {
+            for decode_thread_id in DECODE_THREAD_NAMES.iter().take(num_workers) {
                 let decode_job_rx = Arc::clone(&decode_job_rx);
                 let ui_message_tx = ui_message_tx.clone();
                 let shutdown_flag = Arc::clone(&shutdown_flag);
                 let ctx = cc.egui_ctx.clone();
+                let logger = LOGGER.new_handle(decode_thread_id);
                 let decode_worker_handle = thread::spawn(move || {
                     loop {
-                        // TODO make sure that the RwLock is dropped after this "if" statement
                         if shutdown_flag.load(atomic::Ordering::Acquire) { break; }
                         let decode_job = decode_job_rx.lock().unwrap().recv_timeout(Duration::from_millis(32));
                         if let Ok(file_name) = decode_job {
-                            _ = ui_message_tx.send(UiMessage::Log(Log::new_now(format!("attempting to decode {:?}", file_name), LogLevel::Info, AppThread::Decode(id as u8))));
+                            logger.log(LogLevel::Info, format!("attempting to decode {:?}", file_name).as_str());
                             // TODO Instead of reading the file again, maybe we should just
                             // serialize the costume and use _those_ bytes? The costume data is
                             // owned by a hashmap behind a mutex though... Or maybe we need to
                             // store the CostumeSaveFiles themselves behind an RwLock.
                             let jpeg_bytes = match fs::read(&file_name) {
                                 Ok(bytes) => bytes,
-                                Err(_err) => {
-                                    // TODO log read failure
+                                Err(err) => {
+                                    logger.log(LogLevel::Warn, format!("failed to decode {:?}: {}", file_name, err).as_str());
+                                    // TODO send message to UI that we failed to decode this jpeg
+                                    // so we can maybe display a warning icon or something
                                     continue;
                                 }
                             };
@@ -1084,16 +1136,17 @@ fn main() {
                                 let info = decoder.info().expect("no jpeg info");
                                 let image = egui::ColorImage::from_rgb([info.width as usize, info.height as usize], &pixels);
                                 let texture_handle = ctx.load_texture(file_name.to_str().unwrap(), image, egui::TextureOptions::default());
-                                _ = ui_message_tx.send(UiMessage::Log(Log::new_now(format!("decoded {:?}", file_name), LogLevel::Info, AppThread::Decode(id as u8))));
+                                logger.log(LogLevel::Info, format!("decoded {:?}", file_name).as_str());
                                 _ = ui_message_tx.send(UiMessage::JpegDecoded { file_name, texture_handle });
                                 ctx.request_repaint();
                             }
                         }
                     }
+
+                    logger.log(LogLevel::Info, "shutting down");
                 });
 
                 support_thread_handles.push(decode_worker_handle);
-                // workers.push(join_handle);
             }
 
 
@@ -1110,10 +1163,10 @@ fn main() {
                 let saves = Arc::clone(&saves);
                 let shutdown_flag = Arc::clone(&shutdown_flag);
                 let frame = cc.egui_ctx.clone();
+                let logger = LOGGER.new_handle("SCANNER");
                 let scanner_handle = thread::spawn(move || {
                     let mut last_modified_time: Option<SystemTime> = None;
                     loop {
-                        // TODO make sure that the RwLock is dropped after this "if" statement
                         if shutdown_flag.load(atomic::Ordering::Acquire) { break; }
 
                         let current_dir = env::current_dir().unwrap();
@@ -1125,9 +1178,11 @@ fn main() {
                         }
 
                         if last_modified_time.is_none_or(|lmt| modified_time != lmt) {
+                            logger.log(LogLevel::Info, "detected file system change");
                             last_modified_time = Some(modified_time);
                             let mut saves = saves.lock().unwrap();
                             let mut missing_files: HashSet<OsString> = HashSet::from_iter(saves.keys().cloned());
+                            let mut num_new_files = 0;
                             for entry in fs::read_dir(&current_dir).unwrap().flatten() {
                                 // TODO check that the file starts with Costume_ and is a jpeg file. If not,
                                 // continue. Should that logic be a part of CostumeSaveFile?
@@ -1142,18 +1197,23 @@ fn main() {
                                     let jpeg_raw = fs::read(&file_name).expect("failed to read file");
                                     if let Ok(save) = CostumeSaveFile::new(file_stem, &jpeg_raw) {
                                         saves.insert(file_name, save);
+                                        num_new_files += 1;
                                     }
                                 }
                             }
+                            let num_missing_files = missing_files.len();
                             for missing_file in missing_files {
                                 // TODO figure out if we need to explicitly forget image textures here.
                                 saves.remove(&missing_file);
                             }
+                            logger.log(LogLevel::Info, format!("added {num_new_files} new costumes, removed {num_missing_files} missing costumes").as_str());
                             _ = ui_priority_message_tx.send(UiPriorityMessage::FileListChangedExternally);
                             frame.request_repaint();
                         }
                         thread::sleep(Duration::from_millis(250));
                     }
+
+                    logger.log(LogLevel::Info, "shutting down");
                 });
 
                 support_thread_handles.push(scanner_handle);
@@ -1167,6 +1227,7 @@ fn main() {
                 ui_message_rx,
                 scanner_tx,
                 decode_job_tx,
+                logger: LOGGER.new_handle("UI"),
             };
 
             Ok(Box::new(App::new(cc, args)))
