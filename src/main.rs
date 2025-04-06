@@ -31,6 +31,8 @@ use eframe::egui;
 
 use std::{
     fmt,
+    error,
+    io,
     num::NonZero,
     cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
@@ -267,19 +269,44 @@ impl CostumeSaveFile {
     }
 }
 
-const MAX_LOGS: u16 = 1024;
-
-/// Critical messages that must be handled as soon as possible
-enum UiPriorityMessage {
-    /// We have detected that the file system has changed underneath us in some way.
-    FileListChangedExternally,
+// TODO If there are many error types maybe break the types into their own enum and do this:
+// struct AppError { kind: AppErrorKind, message: Option<String> }
+// enum AppErrorKind { CostumeSaveFailed { source: Option<io::Error>, which: OsString } }
+/// Application errors that currently all require acknowledgement by the UI.
+#[derive(Debug)]
+enum AppError {
+    CostumeSaveFailed { source: Option<io::Error>, which: OsString, message: String },
 }
+
+impl fmt::Display for AppError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::CostumeSaveFailed { source, which, message } => {
+                let header = format!("Failed to save costume {which:?}: {message}");
+                if let Some(source) = source {
+                    write!(f, "{header} - {source}")
+                } else {
+                    write!(f, "{header}")
+                }
+            }
+        }
+    }
+}
+
+impl error::Error for AppError {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        match self {
+            Self::CostumeSaveFailed { source, .. } => source.as_ref().map(|err| err as &dyn error::Error)
+        }
+    }
+}
+
+const MAX_LOGS: u16 = 1024;
 
 enum LogLevel {
     Info,
     Warn,
     Error,
-    Fatal,
 }
 
 impl LogLevel {
@@ -288,7 +315,6 @@ impl LogLevel {
             Self::Info => "INFO",
             Self::Warn => "WARN",
             Self::Error => "ERROR",
-            Self::Fatal => "FATAL",
         }
     }
 }
@@ -329,6 +355,13 @@ struct Logger {
     /// List of logs with the oldest at the end and the newest at the front.
     logs: VecDeque<Log>,
     max_logs: u16,
+    // NOTE(RA): This may not be thread-safe. If two threads produce an error that needs user
+    // action/acknowledgement, only the most recent one will be read. Ideally the system as a whole
+    // should pause operations that could produce errors if the user needs to acknowledge an error,
+    // but there might always be that little bit of time where two threads have seen that no error
+    // is being awaited and then proceed to both produce an error before checking again...
+    /// Will contain an error if the UI needs to acknowledge it.
+    last_error: Option<AppError>,
 }
 
 impl Logger {
@@ -336,7 +369,18 @@ impl Logger {
         Self {
             logs: VecDeque::with_capacity(max_logs as usize),
             max_logs,
+            last_error: None,
         }
+    }
+
+    fn add_log(&mut self, log: Log) {
+        // TODO remove, debugging only
+        // Or maybe find a way to also print logs only if the console is running
+        println!("{}", log.message);
+        if self.logs.len() == self.max_logs.into() {
+            self.logs.pop_back();
+        }
+        self.logs.push_front(log);
     }
 }
 
@@ -358,22 +402,48 @@ impl GlobalLogger {
     }
 }
 
+// TODO maybe we should separate the error system from the logging system?
 impl LoggerHandle {
     fn log(&self, level: LogLevel, message: &str) {
         let log = Log::new_now(level, message, self.thread_id);
         if let Ok(mut logger) = self.logger.write() {
-            // TODO remove, debugging only
-            // Or maybe find a way to also print logs only if the console is running
-            println!("{}", log.message);
-            if logger.logs.len() == logger.max_logs.into() {
-                logger.logs.pop_back();
-            }
-            logger.logs.push_front(log);
+            logger.add_log(log);
         }
+    }
+
+    /// Log an error that needs to be presented to and acknowledged by the user.
+    fn log_err_ack_required(&self, error: AppError) {
+        let log = Log::new_now(LogLevel::Error, &error.to_string(), self.thread_id);
+        if let Ok(mut logger) = self.logger.write() {
+            logger.add_log(log);
+            logger.last_error = Some(error);
+        }
+    }
+
+    fn ui_ack_required(&self) -> bool {
+        self.logger.read().unwrap().last_error.is_some()
+    }
+
+    fn ack_errors(&mut self) {
+        if let Ok(mut logger) = self.logger.write() {
+            logger.last_error = None;
+        }
+    }
+
+    fn with_last_error(&self, mut callback: impl FnMut(Option<&AppError>)) {
+        let locked_logger = self.logger.read().unwrap();
+        let error = locked_logger.last_error.as_ref();
+        callback(error);
     }
 }
 
 static LOGGER: LazyLock<GlobalLogger> = LazyLock::new(|| GlobalLogger(Arc::new(RwLock::new(Logger::new(MAX_LOGS)))));
+
+/// Critical messages that must be handled as soon as possible
+enum UiPriorityMessage {
+    /// We have detected that the file system has changed underneath us in some way.
+    FileListChangedExternally,
+}
 
 /// Regular messages whose handling can be delayed for one or many frames
 enum UiMessage {
@@ -533,6 +603,26 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.logger.ui_ack_required() {
+            egui::Modal::new(egui::Id::new("error modal")).show(ctx, |ui| {
+                self.logger.with_last_error(|error| {
+                    let error = error.unwrap();
+                    let header = match *error {
+                        AppError::CostumeSaveFailed { .. } => "Costume Save Failed",
+                    };
+                    let description = error.to_string();
+                    ui.label(header);
+                    ui.label(description);
+                });
+
+                if ui.button("Ack").clicked() {
+                    self.logger.ack_errors();
+                }
+            });
+
+            return;
+        }
+
         let mut saves = self.saves.lock().unwrap();
         let current_modifiers = ctx.input(|input| input.modifiers);
 
@@ -721,7 +811,12 @@ impl eframe::App for App {
                                 let mut temp_file = match fs::File::create(&temp_file_name) {
                                     Ok(file) => file,
                                     Err(err) => {
-                                        self.logger.log(LogLevel::Error, format!("Failed to open temp file {temp_file_name:?}: {err}").as_str());
+                                        let costume_save_error = AppError::CostumeSaveFailed {
+                                            which: costume_file_name.clone(),
+                                            source: Some(err),
+                                            message: format!("failed to open temp file {temp_file_name:?}"),
+                                        };
+                                        self.logger.log_err_ack_required(costume_save_error);
                                         return;
                                     }
                                 };
@@ -733,7 +828,12 @@ impl eframe::App for App {
                                 let serialized = costume.jpeg.serialize();
 
                                 if let Err(err) = temp_file.write_all(&serialized) {
-                                    self.logger.log(LogLevel::Error, format!("failed to write temp file {temp_file_name:?}: {err}").as_str());
+                                    let costume_save_error = AppError::CostumeSaveFailed {
+                                        which: costume_file_name.clone(),
+                                        source: Some(err),
+                                        message: format!("failed to write temp file {temp_file_name:?}"),
+                                    };
+                                    self.logger.log_err_ack_required(costume_save_error);
                                     return;
                                 }
 
@@ -749,21 +849,36 @@ impl eframe::App for App {
                                     let old_file = match fs::File::open(old_file_name) {
                                         Ok(file) => file,
                                         Err(err) => {
-                                            self.logger.log(LogLevel::Error, format!("failed to open original file {old_file_name:?} for reading: {err}").as_str());
+                                            let costume_save_error = AppError::CostumeSaveFailed {
+                                                which: costume_file_name.clone(),
+                                                source: Some(err),
+                                                message: format!("failed to open original file {old_file_name:?} for reading"),
+                                            };
+                                            self.logger.log_err_ack_required(costume_save_error);
                                             return;
                                         }
                                     };
                                     let old_metadata = match old_file.metadata() {
                                         Ok(metadata) => metadata,
                                         Err(err) => {
-                                            self.logger.log(LogLevel::Error, format!("failed to get metadata for original file {old_file_name:?}: {err}").as_str());
+                                            let costume_save_error = AppError::CostumeSaveFailed {
+                                                which: costume_file_name.clone(),
+                                                source: Some(err),
+                                                message: format!("failed to get metadata for original file {old_file_name:?}"),
+                                            };
+                                            self.logger.log_err_ack_required(costume_save_error);
                                             return;
                                         },
                                     };
                                     let new_metadata = match temp_file.metadata() {
                                         Ok(metadata) => metadata,
                                         Err(err) => {
-                                            self.logger.log(LogLevel::Error, format!("failed to get metadata for new file {new_file_name:?}: {err}").as_str());
+                                            let costume_save_error = AppError::CostumeSaveFailed {
+                                                which: costume_file_name.clone(),
+                                                source: Some(err),
+                                                message: format!("failed to get metadata for new file {new_file_name:?}"),
+                                            };
+                                            self.logger.log_err_ack_required(costume_save_error);
                                             return;
                                         },
                                     };
@@ -774,18 +889,33 @@ impl eframe::App for App {
                                         .set_accessed(new_metadata.accessed().unwrap())
                                         .set_modified(new_metadata.modified().unwrap());
                                     if let Err(err) = temp_file.set_times(times) {
-                                        self.logger.log(LogLevel::Error, format!("failed to update filetimes for {temp_file_name:?}: {err}").as_str());
+                                        let costume_save_error = AppError::CostumeSaveFailed {
+                                            which: costume_file_name.clone(),
+                                            source: Some(err),
+                                            message: format!("failed to update filetimes for {temp_file_name:?}"),
+                                        };
+                                        self.logger.log_err_ack_required(costume_save_error);
                                         return;
                                     }
                                 }
 
                                 if let Err(err) = fs::remove_file(old_file_name) {
-                                    self.logger.log(LogLevel::Error, format!("failed to remove original file {old_file_name:?}: {err}").as_str());
+                                    let costume_save_error = AppError::CostumeSaveFailed {
+                                        which: costume_file_name.clone(),
+                                        source: Some(err),
+                                        message: format!("failed to remove original file {old_file_name:?}"),
+                                    };
+                                    self.logger.log_err_ack_required(costume_save_error);
                                     return;
                                 }
 
                                 if let Err(err) = fs::rename(temp_file_name, &new_file_name) {
-                                    self.logger.log(LogLevel::Error, format!("failed to rename temp file: {err}").as_str());
+                                    let costume_save_error = AppError::CostumeSaveFailed {
+                                        which: costume_file_name.clone(),
+                                        source: Some(err),
+                                        message: "failed to rename temp file".to_string(),
+                                    };
+                                    self.logger.log_err_ack_required(costume_save_error);
                                     return;
                                 }
 
@@ -1111,7 +1241,13 @@ fn main() {
                 let logger = LOGGER.new_handle(decode_thread_id);
                 let decode_worker_handle = thread::spawn(move || {
                     loop {
-                        if shutdown_flag.load(atomic::Ordering::Acquire) { break; }
+                        if logger.ui_ack_required() {
+                            thread::sleep(Duration::from_millis(100));
+                            continue;
+                        }
+                        if shutdown_flag.load(atomic::Ordering::Acquire) {
+                            break;
+                        }
                         let decode_job = decode_job_rx.lock().unwrap().recv_timeout(Duration::from_millis(32));
                         if let Ok(file_name) = decode_job {
                             logger.log(LogLevel::Info, format!("attempting to decode {:?}", file_name).as_str());
@@ -1167,7 +1303,13 @@ fn main() {
                 let scanner_handle = thread::spawn(move || {
                     let mut last_modified_time: Option<SystemTime> = None;
                     loop {
-                        if shutdown_flag.load(atomic::Ordering::Acquire) { break; }
+                        if logger.ui_ack_required() {
+                            thread::sleep(Duration::from_millis(100));
+                            continue;
+                        }
+                        if shutdown_flag.load(atomic::Ordering::Acquire) {
+                            break;
+                        }
 
                         let current_dir = env::current_dir().unwrap();
                         let modified_time = fs::metadata(&current_dir).unwrap().modified().unwrap();
@@ -1210,7 +1352,7 @@ fn main() {
                             _ = ui_priority_message_tx.send(UiPriorityMessage::FileListChangedExternally);
                             frame.request_repaint();
                         }
-                        thread::sleep(Duration::from_millis(250));
+                        thread::sleep(Duration::from_millis(100));
                     }
 
                     logger.log(LogLevel::Info, "shutting down");
