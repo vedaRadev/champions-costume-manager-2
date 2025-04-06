@@ -1352,7 +1352,8 @@ fn main() {
                             _ = ui_priority_message_tx.send(UiPriorityMessage::FileListChangedExternally);
                             frame.request_repaint();
                         }
-                        thread::sleep(Duration::from_millis(100));
+
+                        thread::sleep(Duration::from_millis(32));
                     }
 
                     logger.log(LogLevel::Info, "shutting down");
