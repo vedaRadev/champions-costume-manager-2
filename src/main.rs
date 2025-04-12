@@ -41,7 +41,7 @@ use std::{
     path::Path,
     env,
     fs,
-    sync::{Arc, Mutex, RwLock, atomic, mpsc, LazyLock, RwLockReadGuard},
+    sync::{Arc, Mutex, RwLock, atomic, mpsc, LazyLock},
     thread,
     time::{Duration, SystemTime},
 };
