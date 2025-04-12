@@ -597,8 +597,9 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let window_rect = ctx.available_rect();
+
         if self.logger.ui_ack_required() {
-            let window_rect = ctx.available_rect();
             egui::Modal::new(egui::Id::new("error modal")).show(ctx, |ui| {
                 ui.set_max_size(window_rect.size() * 0.9);
                 ui.set_min_width(0.0);
@@ -674,9 +675,12 @@ impl eframe::App for App {
         if self.costume_spec_edit_open {
             assert_eq!(self.selected_costumes.len(), 1);
 
-            // TODO figure out how to make this modal wider
             let modal = egui::Modal::new(egui::Id::new("Costume Spec Edit"));
             modal.show(ctx, |ui| {
+                ui.set_max_height(window_rect.height() * 0.9);
+                ui.set_max_width(window_rect.width() * 0.5);
+                ui.set_min_size([0.0, 0.0].into());
+
                 ui.label("EDITING THE COSTUME SPEC IS AN EXPERIMENTAL AND DANGEROUS FEATURE! BEWARE!");
                 ui.label("Incorrectly modifying the costume spec can corrupt your save and make it unloadable in-game! Make a backup!");
                 ui.label("Spec changes will be saved upon closing this modal and saving the costume.");
@@ -697,7 +701,7 @@ impl eframe::App for App {
                     ui.label(&self.costume_edit.as_ref().unwrap().costume_hash);
                 });
 
-                let scroll_area = egui::ScrollArea::vertical().max_height(500.0);
+                let scroll_area = egui::ScrollArea::vertical();
                 scroll_area.show(ui, |ui| {
                     let spec_editor = ui.add_enabled(
                         self.confirm_edit_spec,
