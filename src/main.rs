@@ -625,9 +625,24 @@ impl eframe::App for App {
                     ui.separator();
                 }
 
-                if ui.button("Okay").clicked() {
-                    self.logger.ack_errors();
-                }
+                ui.horizontal(|ui| {
+                    if ui.button("Okay").clicked() {
+                        self.logger.ack_errors();
+                    }
+
+                    if ui.button("Copy Logs to Clipboard").clicked() {
+                        let logs = &self.logger.shared_logger.read().unwrap().logs;
+                        let num_logs = logs.len();
+                        // 100 bytes per log + bytes for newlines be a good starting assumption
+                        let mut serialized = String::with_capacity(num_logs * 100 + num_logs - 1);
+                        for Log { message, .. } in logs.iter() {
+                            serialized.push_str(message);
+                            serialized.push('\n');
+                        }
+
+                        ui.output_mut(|platform| platform.copied_text = serialized);
+                    }
+                });
             });
 
             return;
