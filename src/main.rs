@@ -41,7 +41,7 @@ use std::{
     path::Path,
     env,
     fs,
-    sync::{Arc, Mutex, RwLock, atomic, mpsc, LazyLock},
+    sync::{Arc, Mutex, RwLock, atomic, mpsc, LazyLock, RwLockReadGuard},
     thread,
     time::{Duration, SystemTime},
 };
@@ -390,13 +390,13 @@ struct GlobalLogger(SharedLogger);
 
 struct LoggerHandle {
     thread_id: &'static str,
-    logger: SharedLogger,
+    shared_logger: SharedLogger,
 }
 
 impl GlobalLogger {
     fn new_handle(&self, thread_id: &'static str) -> LoggerHandle {
         LoggerHandle {
-            logger: Arc::clone(&self.0),
+            shared_logger: Arc::clone(&self.0),
             thread_id,
         }
     }
@@ -406,7 +406,7 @@ impl GlobalLogger {
 impl LoggerHandle {
     fn log(&self, level: LogLevel, message: &str) {
         let log = Log::new_now(level, message, self.thread_id);
-        if let Ok(mut logger) = self.logger.write() {
+        if let Ok(mut logger) = self.shared_logger.write() {
             logger.add_log(log);
         }
     }
@@ -414,26 +414,20 @@ impl LoggerHandle {
     /// Log an error that needs to be presented to and acknowledged by the user.
     fn log_err_ack_required(&self, error: AppError) {
         let log = Log::new_now(LogLevel::Error, &error.to_string(), self.thread_id);
-        if let Ok(mut logger) = self.logger.write() {
+        if let Ok(mut logger) = self.shared_logger.write() {
             logger.add_log(log);
             logger.last_error = Some(error);
         }
     }
 
     fn ui_ack_required(&self) -> bool {
-        self.logger.read().unwrap().last_error.is_some()
+        self.shared_logger.read().unwrap().last_error.is_some()
     }
 
     fn ack_errors(&mut self) {
-        if let Ok(mut logger) = self.logger.write() {
+        if let Ok(mut logger) = self.shared_logger.write() {
             logger.last_error = None;
         }
-    }
-
-    fn with_last_error(&self, mut callback: impl FnMut(Option<&AppError>)) {
-        let locked_logger = self.logger.read().unwrap();
-        let error = locked_logger.last_error.as_ref();
-        callback(error);
     }
 }
 
@@ -604,18 +598,33 @@ impl eframe::App for App {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.logger.ui_ack_required() {
+            let window_rect = ctx.available_rect();
             egui::Modal::new(egui::Id::new("error modal")).show(ctx, |ui| {
-                self.logger.with_last_error(|error| {
-                    let error = error.unwrap();
-                    let header = match *error {
+                ui.set_max_size(window_rect.size() * 0.9);
+                ui.set_min_width(0.0);
+
+                {
+                    let logger = self.logger.shared_logger.read().unwrap();
+                    let error = logger.last_error.as_ref().unwrap();
+                    let header = match error {
                         AppError::CostumeSaveFailed { .. } => "Costume Save Failed",
                     };
                     let description = error.to_string();
                     ui.label(header);
                     ui.label(description);
-                });
 
-                if ui.button("Ack").clicked() {
+                    ui.separator();
+                    egui::ScrollArea::both().show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        let locked_logger = self.logger.shared_logger.read().unwrap();
+                        for log in locked_logger.logs.iter() {
+                            ui.label(&log.message);
+                        }
+                    });
+                    ui.separator();
+                }
+
+                if ui.button("Okay").clicked() {
                     self.logger.ack_errors();
                 }
             });
@@ -1241,12 +1250,12 @@ fn main() {
                 let logger = LOGGER.new_handle(decode_thread_id);
                 let decode_worker_handle = thread::spawn(move || {
                     loop {
+                        if shutdown_flag.load(atomic::Ordering::Acquire) {
+                            break;
+                        }
                         if logger.ui_ack_required() {
                             thread::sleep(Duration::from_millis(100));
                             continue;
-                        }
-                        if shutdown_flag.load(atomic::Ordering::Acquire) {
-                            break;
                         }
                         let decode_job = decode_job_rx.lock().unwrap().recv_timeout(Duration::from_millis(32));
                         if let Ok(file_name) = decode_job {
@@ -1303,12 +1312,12 @@ fn main() {
                 let scanner_handle = thread::spawn(move || {
                     let mut last_modified_time: Option<SystemTime> = None;
                     loop {
+                        if shutdown_flag.load(atomic::Ordering::Acquire) {
+                            break;
+                        }
                         if logger.ui_ack_required() {
                             thread::sleep(Duration::from_millis(100));
                             continue;
-                        }
-                        if shutdown_flag.load(atomic::Ordering::Acquire) {
-                            break;
                         }
 
                         let current_dir = env::current_dir().unwrap();
