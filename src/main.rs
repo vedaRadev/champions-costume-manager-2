@@ -12,9 +12,6 @@
 // methods that will get the individual fields out?
 //
 // AUDIT Should we use env::current_dir or share the costume dir across threads?
-//
-// AUDIT If _many_ logs are generated per frame then maybe we shouldn't be sending them through a
-// channel. Maybe we should just use an Arc<Mutex<...>>.
 
 mod jpeg;
 
