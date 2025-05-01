@@ -3,3 +3,4 @@
 **/*.rdbg
 **/*.zip
 /.idea/
+/.vscode/
