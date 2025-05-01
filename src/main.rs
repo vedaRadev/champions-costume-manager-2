@@ -21,6 +21,9 @@
 // TODO add an actual event system? e.g. saving/deleting files could be triggered by events
 // dispatched from the UI, and any errors would also be fed into the event system instead of the
 // logging system.
+// This could also solve an issue where displaying the UI takes a while because the scanner thread
+// locks the saves hashmap and parses _every_ costume file on startup. I probably could change this
+// now using a channel and just lock the hashmap to retrieve the current keys.
 //
 // TODO refactor and simplify the app update loop. Really just for the modal/dialog stuff at the
 // moment since we only ever should show one of those at a time.
@@ -1414,10 +1417,8 @@ fn main() {
                                     #[allow(clippy::map_entry)]
                                     if saves.contains_key(&file_name) {
                                         missing_files.remove(&file_name);
-                                        // TODO maybe log if we failed to parse the costume save?
                                     } else {
-                                        let file_stem = Path::new(&file_name).file_stem().unwrap().to_str().unwrap();
-                                        let jpeg_raw = match fs::read(&file_name) {
+                                        let jpeg_raw = match fs::read(entry.path()) {
                                             Ok(contents) => contents,
                                             Err(err) => {
                                                 logger.log(LogLevel::Warn, format!("error reading {file_name:?}: {}", err).as_str());
@@ -1425,6 +1426,8 @@ fn main() {
                                             }
                                         };
 
+                                        let file_stem = Path::new(&file_name).file_stem().unwrap().to_str().unwrap();
+                                        // TODO maybe log if we failed to parse the costume save?
                                         if let Ok(save) = CostumeSaveFile::new(file_stem, &jpeg_raw) {
                                             saves.insert(file_name, save);
                                             num_new_files += 1;
