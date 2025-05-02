@@ -604,7 +604,7 @@ impl<'a> App<'a> {
     }
 }
 
-impl<'a> eframe::App for App<'a> {
+impl eframe::App for App<'_> {
     // Gracefully shut down all our supporting threads.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.logger.log(LogLevel::Info, "signalling shutdown");
@@ -1315,6 +1315,7 @@ fn main() {
                 let shutdown_flag = Arc::clone(&shutdown_flag);
                 let ctx = cc.egui_ctx.clone();
                 let logger = LOGGER.new_handle(decode_thread_id);
+                let costume_dir = Arc::clone(&costume_dir);
                 let decode_worker_handle = thread::spawn(move || {
                     loop {
                         if shutdown_flag.load(atomic::Ordering::Acquire) {
@@ -1327,11 +1328,20 @@ fn main() {
                         let decode_job = decode_job_rx.lock().unwrap().recv_timeout(Duration::from_millis(32));
                         if let Ok(file_name) = decode_job {
                             logger.log(LogLevel::Info, format!("attempting to decode {:?}", file_name).as_str());
+                            let costume_dir = costume_dir.read().unwrap();
+                            if costume_dir.is_none() {
+                                logger.log(LogLevel::Error, format!("attempted to decode {file_name:?} but our costume directory is not set!").as_str());
+                                debug_assert!(costume_dir.is_some()); // technically just a debug_assert!(false)
+                                continue;
+                            }
+                            let costume_dir = costume_dir.unwrap();
+
                             // TODO Instead of reading the file again, maybe we should just
                             // serialize the costume and use _those_ bytes? The costume data is
                             // owned by a hashmap behind a mutex though... Or maybe we need to
                             // store the CostumeSaveFiles themselves behind an RwLock.
-                            let jpeg_bytes = match fs::read(&file_name) {
+                            let file_path = Path::new(costume_dir).join(&file_name);
+                            let jpeg_bytes = match fs::read(&file_path) {
                                 Ok(bytes) => bytes,
                                 Err(err) => {
                                     logger.log(LogLevel::Warn, format!("failed to decode {:?}: {}", file_name, err).as_str());
@@ -1367,6 +1377,7 @@ fn main() {
             // struct Something { last_modified: LastModifiedTimestamp, save: CostumeSaveFile }
             // NOTE If we do this, then we don't have to get the file metadata during sorting since
             // it'll already be here in the hashmap.
+            // TODO maybe these keys should be PathBuf's that represent the absolute path of the file?
             let saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>> = Arc::new(Mutex::new(HashMap::new()));
             egui_extras::install_image_loaders(&cc.egui_ctx);
 
