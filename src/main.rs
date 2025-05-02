@@ -1,32 +1,35 @@
 // TODO Once this is in a more stable state and prototyping is finished, run through and figure out
 // how to reduce the amount of cloning we're doing.
-//
+
 // TODO Eventually refactor to compress UI actions (e.g. selected file save, delete, etc.). I think
 // we should wait until we're further along to actually implement this. If we abstract or DRY up
 // too early then when we want to go through and harden the app by adding things like logging on
 // filesystem interaction failure, it might just make implementing it more of a nightmare.
-//
+
 // TODO Make the API for getting data from the CostumeSaveFile better. It's a bit messy right now
 // because every JpegApp13Payload access returns the data we want and an RwLockReadGuard.
 // Maybe it would be better to just lock the entire app13 payload and return that, then have some
 // methods that will get the individual fields out?
-//
+
 // TODO refactor so that the UI always loads and can display errors, even ones related to startup.
-//
+
 // TODO Better app config / startup. Here's probably what I want to do:
 // Attempt to load app config from file.
 // If file doesn't exist or data is invalid, display a window asking for user config.
 // When config changes, save to file.
-//
+
 // TODO add an actual event system? e.g. saving/deleting files could be triggered by events
 // dispatched from the UI, and any errors would also be fed into the event system instead of the
 // logging system.
 // This could also solve an issue where displaying the UI takes a while because the scanner thread
 // locks the saves hashmap and parses _every_ costume file on startup. I probably could change this
 // now using a channel and just lock the hashmap to retrieve the current keys.
-//
+
 // TODO refactor and simplify the app update loop. Really just for the modal/dialog stuff at the
 // moment since we only ever should show one of those at a time.
+
+// TODO should we verify that a costume directory is selected before performing a costume file
+// operation (e.g. save, delete)
 
 mod jpeg;
 
@@ -49,8 +52,7 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
     io::prelude::*,
-    ffi::OsString,
-    path::Path,
+    path::{Path, PathBuf},
     fs,
     sync::{Arc, Mutex, RwLock, atomic, mpsc, LazyLock},
     thread,
@@ -286,7 +288,7 @@ impl CostumeSaveFile {
 /// Application errors that currently all require acknowledgement by the UI.
 #[derive(Debug)]
 enum AppError {
-    CostumeSaveFailed { source: Option<io::Error>, which: OsString, message: String },
+    CostumeSaveFailed { source: Option<io::Error>, which: PathBuf, message: String },
 }
 
 impl fmt::Display for AppError {
@@ -452,7 +454,7 @@ enum UiPriorityMessage {
 
 /// Regular messages whose handling can be delayed for one or many frames
 enum UiMessage {
-    JpegDecoded { file_name: OsString, texture_handle: egui::TextureHandle },
+    JpegDecoded { file_path: PathBuf, texture_handle: egui::TextureHandle },
 }
 
 #[derive(Default)]
@@ -477,7 +479,7 @@ enum SortType { Name, CreationTime, ModifiedTime }
 struct App<'a> {
     costume_dir: Arc<RwLock<Option<&'a str>>>,
 
-    saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>>,
+    saves: Arc<Mutex<HashMap<PathBuf, CostumeSaveFile>>>,
 
     logger: LoggerHandle,
 
@@ -488,14 +490,16 @@ struct App<'a> {
     ui_priority_message_rx: mpsc::Receiver<UiPriorityMessage>,
     ui_message_rx: mpsc::Receiver<UiMessage>,
     scanner_tx: mpsc::Sender<SystemTime>,
-    decode_job_tx: mpsc::Sender<OsString>,
+    // TODO can we make this send &Path instead of PathBuf?
+    decode_job_tx: mpsc::Sender<PathBuf>,
 
     app_config_modal_open: bool,
     file_exists_warning_modal_open: bool,
     show_images_in_selection_list: bool,
     costume_spec_edit_open: bool,
     confirm_edit_spec: bool,
-    sorted_saves: Vec<OsString>,
+    // TODO try to make this a Vec<&Path> if possible
+    sorted_saves: Vec<PathBuf>,
     /// Values are indices into self.sorted_saves.
     selected_costumes: HashSet<usize>,
     selection_range_pivot: usize,
@@ -506,13 +510,14 @@ struct App<'a> {
 
 struct AppArgs<'a> {
     costume_dir: Arc<RwLock<Option<&'a str>>>,
-    saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>>,
+    saves: Arc<Mutex<HashMap<PathBuf, CostumeSaveFile>>>,
     shutdown_flag: Arc<atomic::AtomicBool>,
     support_thread_handles: Vec<thread::JoinHandle<()>>,
     ui_priority_message_rx: mpsc::Receiver<UiPriorityMessage>,
     ui_message_rx: mpsc::Receiver<UiMessage>,
     scanner_tx: mpsc::Sender<SystemTime>,
-    decode_job_tx: mpsc::Sender<OsString>,
+    // TODO can we make this a Sender<&Path>?
+    decode_job_tx: mpsc::Sender<PathBuf>,
     logger: LoggerHandle,
 }
 
@@ -568,7 +573,7 @@ impl<'a> App<'a> {
     // FIXME We might need to support case-insensitive sorting on non-ascii characters, in which
     // case we'll need to use to_lowercase(). Might require more cloning than is necessary, so
     // maybe find a way to do that efficiently.
-    fn sort_saves(sort_type: SortType, display_type: DisplayType, keys_to_sort: &mut [OsString], locked_saves: &std::sync::MutexGuard<HashMap<OsString, CostumeSaveFile>>) {
+    fn sort_saves(sort_type: SortType, display_type: DisplayType, keys_to_sort: &mut [PathBuf], locked_saves: &std::sync::MutexGuard<HashMap<PathBuf, CostumeSaveFile>>) {
         match sort_type {
             SortType::Name => {
                 match display_type {
@@ -582,7 +587,7 @@ impl<'a> App<'a> {
                     },
 
                     DisplayType::FileName => {
-                        keys_to_sort.sort_by_key(|k| k.to_ascii_lowercase());
+                        keys_to_sort.sort_by_key(|k| k.file_stem().unwrap().to_ascii_lowercase());
                     },
                 }
             },
@@ -691,9 +696,9 @@ impl eframe::App for App<'_> {
             let message = self.ui_message_rx.try_recv();
             if message.is_err() { break; }
             match message.unwrap() {
-                UiMessage::JpegDecoded { file_name, texture_handle } => {
-                    if saves.contains_key(&file_name) {
-                        saves.get_mut(&file_name).unwrap().image_texture = CostumeImage::Loaded(texture_handle);
+                UiMessage::JpegDecoded { file_path, texture_handle } => {
+                    if saves.contains_key(&file_path) {
+                        saves.get_mut(&file_path).unwrap().image_texture = CostumeImage::Loaded(texture_handle);
                     }
                 },
             }
@@ -784,8 +789,8 @@ impl eframe::App for App<'_> {
                     ui.label(format!("{} selected items", self.selected_costumes.len()));
                 } else if self.selected_costumes.len() == 1 {
                     // FIXME probably ultimately unnecessary clone
-                    let costume_file_name = &self.sorted_saves[*self.selected_costumes.iter().last().unwrap()].clone();
-                    let costume = saves.get_mut(costume_file_name).unwrap();
+                    let costume_path = &self.sorted_saves[*self.selected_costumes.iter().last().unwrap()].clone();
+                    let costume = saves.get_mut(costume_path).unwrap();
                     let costume_edit = self.costume_edit.as_mut().unwrap();
 
                     // TODO there's another place in the image grid where we do something very
@@ -798,7 +803,7 @@ impl eframe::App for App<'_> {
                     } else {
                         if matches!(costume.image_texture, CostumeImage::NotLoaded) {
                             // TODO log and send error
-                            _ = self.decode_job_tx.send(costume_file_name.clone());
+                            _ = self.decode_job_tx.send(costume_path.clone());
                             costume.image_texture = CostumeImage::Loading;
                         }
                         ui.label("loading image...");
@@ -847,33 +852,40 @@ impl eframe::App for App<'_> {
                     // TODO if only file name was changed maybe only rename the file via OS?
                     // FIXME Logging, not crashing!
                     if ui.button("Save").clicked() {
-                        let old_file_name = costume_file_name;
-                        let new_file_name = get_file_name(&costume_edit.save_name, costume_edit.timestamp);
-                        let temp_file_name = OsString::from(format!("{new_file_name}.CCM_TEMP"));
-                        let new_file_name = OsString::from(new_file_name);
-                        let file_name_changed = *new_file_name != *old_file_name;
+                        let costume_dir = self.costume_dir.read().unwrap();
+                        debug_assert!(costume_dir.is_some());
+                        let costume_dir = Path::new(costume_dir.unwrap());
+                        debug_assert!(costume_path.as_path().parent() == Some(costume_dir));
+
+                        let old_file_path = costume_path;
+                        let new_file_path = costume_dir.join(get_file_name(&costume_edit.save_name, costume_edit.timestamp));
+                        let mut temp_file_path = new_file_path.clone();
+                        // FIXME should probably grab the current extension of new_file_path and
+                        // use that to create the temp extension
+                        temp_file_path.set_extension("jpg.CCM_TEMP");
+                        let file_name_changed = new_file_path.file_name().unwrap() != old_file_path.file_name().unwrap();
 
                         // FIXME There is potentially a massive, terrible bug here on Windows where
                         // we're NOT catching here due to Windows' case insensitivity! If we've
                         // changed the file name but saves contains the same name with a different
                         // casing, we WON'T catch it!
-                        if file_name_changed && saves.contains_key(&new_file_name) {
+                        if file_name_changed && saves.contains_key(&new_file_path) {
                             self.file_exists_warning_modal_open = true;
                         } else {
-                            self.logger.log(LogLevel::Info, format!("attempting to save {old_file_name:?} as {new_file_name:?}").as_str());
+                            self.logger.log(LogLevel::Info, format!("attempting to save {old_file_path:?} as {new_file_path:?}").as_str());
                             // TODO Create a SaveError type, map all errors in this block to that
                             // and include additional information about the failed operation, and
                             // just use the `?` operator. Return a result and log if there's an
                             // error afterward.
                             (|| {
-                                let costume = saves.get_mut(costume_file_name).unwrap();
-                                let mut temp_file = match fs::File::create(&temp_file_name) {
+                                let costume = saves.get_mut(costume_path).unwrap();
+                                let mut temp_file = match fs::File::create(&temp_file_path) {
                                     Ok(file) => file,
                                     Err(err) => {
                                         let costume_save_error = AppError::CostumeSaveFailed {
-                                            which: costume_file_name.clone(),
+                                            which: costume_path.clone(),
                                             source: Some(err),
-                                            message: format!("failed to open temp file {temp_file_name:?}"),
+                                            message: format!("failed to open temp file {temp_file_path:?}"),
                                         };
                                         self.logger.log_err_ack_required(costume_save_error);
                                         return;
@@ -888,9 +900,9 @@ impl eframe::App for App<'_> {
 
                                 if let Err(err) = temp_file.write_all(&serialized) {
                                     let costume_save_error = AppError::CostumeSaveFailed {
-                                        which: costume_file_name.clone(),
+                                        which: costume_path.clone(),
                                         source: Some(err),
-                                        message: format!("failed to write temp file {temp_file_name:?}"),
+                                        message: format!("failed to write temp file {temp_file_path:?}"),
                                     };
                                     self.logger.log_err_ack_required(costume_save_error);
                                     return;
@@ -905,13 +917,13 @@ impl eframe::App for App<'_> {
                                 #[cfg(windows)]
                                 {
                                     use std::os::windows::fs::FileTimesExt;
-                                    let old_file = match fs::File::open(old_file_name) {
+                                    let old_file = match fs::File::open(old_file_path) {
                                         Ok(file) => file,
                                         Err(err) => {
                                             let costume_save_error = AppError::CostumeSaveFailed {
-                                                which: costume_file_name.clone(),
+                                                which: costume_path.clone(),
                                                 source: Some(err),
-                                                message: format!("failed to open original file {old_file_name:?} for reading"),
+                                                message: format!("failed to open original file {old_file_path:?} for reading"),
                                             };
                                             self.logger.log_err_ack_required(costume_save_error);
                                             return;
@@ -921,9 +933,9 @@ impl eframe::App for App<'_> {
                                         Ok(metadata) => metadata,
                                         Err(err) => {
                                             let costume_save_error = AppError::CostumeSaveFailed {
-                                                which: costume_file_name.clone(),
+                                                which: costume_path.clone(),
                                                 source: Some(err),
-                                                message: format!("failed to get metadata for original file {old_file_name:?}"),
+                                                message: format!("failed to get metadata for original file {old_file_path:?}"),
                                             };
                                             self.logger.log_err_ack_required(costume_save_error);
                                             return;
@@ -933,9 +945,9 @@ impl eframe::App for App<'_> {
                                         Ok(metadata) => metadata,
                                         Err(err) => {
                                             let costume_save_error = AppError::CostumeSaveFailed {
-                                                which: costume_file_name.clone(),
+                                                which: costume_path.clone(),
                                                 source: Some(err),
-                                                message: format!("failed to get metadata for new file {new_file_name:?}"),
+                                                message: format!("failed to get metadata for new file {new_file_path:?}"),
                                             };
                                             self.logger.log_err_ack_required(costume_save_error);
                                             return;
@@ -949,28 +961,28 @@ impl eframe::App for App<'_> {
                                         .set_modified(new_metadata.modified().unwrap());
                                     if let Err(err) = temp_file.set_times(times) {
                                         let costume_save_error = AppError::CostumeSaveFailed {
-                                            which: costume_file_name.clone(),
+                                            which: costume_path.clone(),
                                             source: Some(err),
-                                            message: format!("failed to update filetimes for {temp_file_name:?}"),
+                                            message: format!("failed to update filetimes for {temp_file_path:?}"),
                                         };
                                         self.logger.log_err_ack_required(costume_save_error);
                                         return;
                                     }
                                 }
 
-                                if let Err(err) = fs::remove_file(old_file_name) {
+                                if let Err(err) = fs::remove_file(old_file_path) {
                                     let costume_save_error = AppError::CostumeSaveFailed {
-                                        which: costume_file_name.clone(),
+                                        which: costume_path.clone(),
                                         source: Some(err),
-                                        message: format!("failed to remove original file {old_file_name:?}"),
+                                        message: format!("failed to remove original file {old_file_path:?}"),
                                     };
                                     self.logger.log_err_ack_required(costume_save_error);
                                     return;
                                 }
 
-                                if let Err(err) = fs::rename(temp_file_name, &new_file_name) {
+                                if let Err(err) = fs::rename(temp_file_path, &new_file_path) {
                                     let costume_save_error = AppError::CostumeSaveFailed {
-                                        which: costume_file_name.clone(),
+                                        which: costume_path.clone(),
                                         source: Some(err),
                                         message: "failed to rename temp file".to_string(),
                                     };
@@ -978,21 +990,21 @@ impl eframe::App for App<'_> {
                                     return;
                                 }
 
-                                self.logger.log(LogLevel::Info, format!("successfully saved {new_file_name:?}").as_str());
+                                self.logger.log(LogLevel::Info, format!("successfully saved {new_file_path:?}").as_str());
 
                                 // FIXME really lazy and inefficient. I don't think we can know where the new
                                 // save name will be after sorting (maybe we actually can) but we can probably
                                 // pass along the index of the old save with this event. Would eliminate an
                                 // entire scan through the sorted_saves array.
-                                let (old_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| *save == old_file_name).unwrap();
+                                let (old_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| *save == old_file_path).unwrap();
                                 assert!(self.selected_costumes.remove(&old_index));
 
-                                let save = saves.remove(old_file_name).unwrap();
-                                saves.insert(new_file_name.clone(), save);
+                                let save = saves.remove(old_file_path).unwrap();
+                                saves.insert(new_file_path.clone(), save);
                                 self.sorted_saves = saves.keys().cloned().collect();
                                 Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
 
-                                let (new_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| **save == new_file_name).unwrap();
+                                let (new_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| **save == new_file_path).unwrap();
                                 self.selected_costumes.insert(new_index);
 
                                 // TODO find a way to compress this code since we do the exact same thing when
@@ -1018,12 +1030,12 @@ impl eframe::App for App<'_> {
                 if ui.button("Delete").clicked() {
                     // TODO show delete confirmation popup
                     for selected_idx in self.selected_costumes.iter() {
-                        let costume_file_name = &self.sorted_saves[*selected_idx];
-                        if let Err(err) = fs::remove_file(costume_file_name) {
-                            self.logger.log(LogLevel::Error, format!("failed to delete {costume_file_name:?}: {err}").as_str());
+                        let costume_path = &self.sorted_saves[*selected_idx];
+                        if let Err(err) = fs::remove_file(costume_path) {
+                            self.logger.log(LogLevel::Error, format!("failed to delete {costume_path:?}: {err}").as_str());
                             continue;
                         }
-                        saves.remove(costume_file_name);
+                        saves.remove(costume_path);
                     }
                     self.sorted_saves = saves.keys().cloned().collect();
                     Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
@@ -1305,7 +1317,7 @@ fn main() {
 
             let available_cores = thread::available_parallelism().map(NonZero::get).unwrap_or(MAX_DECODE_THREADS);
             let num_workers = MAX_DECODE_THREADS.min(available_cores);
-            let (decode_job_tx, decode_job_rx) = mpsc::channel::<OsString>();
+            let (decode_job_tx, decode_job_rx) = mpsc::channel::<PathBuf>();
             let decode_job_rx = Arc::new(Mutex::new(decode_job_rx));
 
             // workers for decoding
@@ -1315,7 +1327,6 @@ fn main() {
                 let shutdown_flag = Arc::clone(&shutdown_flag);
                 let ctx = cc.egui_ctx.clone();
                 let logger = LOGGER.new_handle(decode_thread_id);
-                let costume_dir = Arc::clone(&costume_dir);
                 let decode_worker_handle = thread::spawn(move || {
                     loop {
                         if shutdown_flag.load(atomic::Ordering::Acquire) {
@@ -1326,25 +1337,15 @@ fn main() {
                             continue;
                         }
                         let decode_job = decode_job_rx.lock().unwrap().recv_timeout(Duration::from_millis(32));
-                        if let Ok(file_name) = decode_job {
-                            logger.log(LogLevel::Info, format!("attempting to decode {:?}", file_name).as_str());
-                            let costume_dir = costume_dir.read().unwrap();
-                            if costume_dir.is_none() {
-                                logger.log(LogLevel::Error, format!("attempted to decode {file_name:?} but our costume directory is not set!").as_str());
-                                debug_assert!(costume_dir.is_some()); // technically just a debug_assert!(false)
-                                continue;
-                            }
-                            let costume_dir = costume_dir.unwrap();
-
+                        if let Ok(file_path) = decode_job {
                             // TODO Instead of reading the file again, maybe we should just
                             // serialize the costume and use _those_ bytes? The costume data is
                             // owned by a hashmap behind a mutex though... Or maybe we need to
                             // store the CostumeSaveFiles themselves behind an RwLock.
-                            let file_path = Path::new(costume_dir).join(&file_name);
                             let jpeg_bytes = match fs::read(&file_path) {
                                 Ok(bytes) => bytes,
                                 Err(err) => {
-                                    logger.log(LogLevel::Warn, format!("failed to decode {:?}: {}", file_name, err).as_str());
+                                    logger.log(LogLevel::Warn, format!("failed to decode {:?}: {}", file_path, err).as_str());
                                     // TODO send message to UI that we failed to decode this jpeg
                                     // so we can maybe display a warning icon or something
                                     continue;
@@ -1357,9 +1358,9 @@ fn main() {
                                 // TODO default if doesn't exist
                                 let info = decoder.info().expect("no jpeg info");
                                 let image = egui::ColorImage::from_rgb([info.width as usize, info.height as usize], &pixels);
-                                let texture_handle = ctx.load_texture(file_name.to_str().unwrap(), image, egui::TextureOptions::default());
-                                logger.log(LogLevel::Info, format!("decoded {:?}", file_name).as_str());
-                                _ = ui_message_tx.send(UiMessage::JpegDecoded { file_name, texture_handle });
+                                let texture_handle = ctx.load_texture(file_path.to_str().unwrap(), image, egui::TextureOptions::default());
+                                logger.log(LogLevel::Info, format!("decoded {:?}", file_path).as_str());
+                                _ = ui_message_tx.send(UiMessage::JpegDecoded { file_path, texture_handle });
                                 ctx.request_repaint();
                             }
                         }
@@ -1377,8 +1378,7 @@ fn main() {
             // struct Something { last_modified: LastModifiedTimestamp, save: CostumeSaveFile }
             // NOTE If we do this, then we don't have to get the file metadata during sorting since
             // it'll already be here in the hashmap.
-            // TODO maybe these keys should be PathBuf's that represent the absolute path of the file?
-            let saves: Arc<Mutex<HashMap<OsString, CostumeSaveFile>>> = Arc::new(Mutex::new(HashMap::new()));
+            let saves: Arc<Mutex<HashMap<PathBuf, CostumeSaveFile>>> = Arc::new(Mutex::new(HashMap::new()));
             egui_extras::install_image_loaders(&cc.egui_ctx);
 
             // SCANNING THREAD
@@ -1419,28 +1419,30 @@ fn main() {
                                 logger.log(LogLevel::Info, "detected file system change");
                                 last_modified_time = Some(modified_time);
                                 let mut saves = saves.lock().unwrap();
-                                let mut missing_files: HashSet<OsString> = HashSet::from_iter(saves.keys().cloned());
+                                // TODO maybe we can key the saves hashmap on Rc<Path> so that we
+                                // can do cheap clones?
+                                let mut missing_files: HashSet<PathBuf> = HashSet::from_iter(saves.keys().cloned());
                                 let mut num_new_files = 0;
                                 for entry in fs::read_dir(costume_dir).unwrap().flatten() {
                                     // TODO check that the file starts with Costume_ and is a jpeg file. If not,
                                     // continue. Should that logic be a part of CostumeSaveFile?
-                                    let file_name = entry.file_name();
+                                    let file_path = entry.path();
                                     #[allow(clippy::map_entry)]
-                                    if saves.contains_key(&file_name) {
-                                        missing_files.remove(&file_name);
+                                    if saves.contains_key(&file_path) {
+                                        missing_files.remove(file_path.as_path());
                                     } else {
                                         let jpeg_raw = match fs::read(entry.path()) {
                                             Ok(contents) => contents,
                                             Err(err) => {
-                                                logger.log(LogLevel::Warn, format!("error reading {file_name:?}: {}", err).as_str());
+                                                logger.log(LogLevel::Warn, format!("error reading {file_path:?}: {}", err).as_str());
                                                 continue;
                                             }
                                         };
 
-                                        let file_stem = Path::new(&file_name).file_stem().unwrap().to_str().unwrap();
+                                        let file_stem = file_path.file_stem().unwrap();
                                         // TODO maybe log if we failed to parse the costume save?
-                                        if let Ok(save) = CostumeSaveFile::new(file_stem, &jpeg_raw) {
-                                            saves.insert(file_name, save);
+                                        if let Ok(save) = CostumeSaveFile::new(file_stem.to_str().unwrap(), &jpeg_raw) {
+                                            saves.insert(file_path, save);
                                             num_new_files += 1;
                                         }
                                     }
