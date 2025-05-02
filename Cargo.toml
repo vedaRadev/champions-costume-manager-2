@@ -21,4 +21,5 @@ chrono = "0.4.39"
 eframe = "0.30.0"
 egui_extras = { version = "0.30.0", features = ["file", "image"] }
 image = { version = "0.25.5", features = ["jpeg"] }
+rfd = "0.15.3"
 zune-jpeg = "0.4.14"

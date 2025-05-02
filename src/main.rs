@@ -52,7 +52,7 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
     io::prelude::*,
-    path::{Path, PathBuf},
+    path::PathBuf,
     fs,
     sync::{Arc, Mutex, RwLock, atomic, mpsc, LazyLock},
     thread,
@@ -476,8 +476,8 @@ enum DisplayType { DisplayName, FileName }
 enum SortType { Name, CreationTime, ModifiedTime }
 
 // TODO maybe tie the selected costume and costume edit together so they can never get out of sync?
-struct App<'a> {
-    costume_dir: Arc<RwLock<Option<&'a str>>>,
+struct App {
+    costume_dir: Arc<RwLock<Option<PathBuf>>>,
 
     saves: Arc<Mutex<HashMap<PathBuf, CostumeSaveFile>>>,
 
@@ -493,7 +493,6 @@ struct App<'a> {
     // TODO can we make this send &Path instead of PathBuf?
     decode_job_tx: mpsc::Sender<PathBuf>,
 
-    app_config_modal_open: bool,
     file_exists_warning_modal_open: bool,
     show_images_in_selection_list: bool,
     costume_spec_edit_open: bool,
@@ -508,8 +507,8 @@ struct App<'a> {
     costume_edit: Option<CostumeEdit>,
 }
 
-struct AppArgs<'a> {
-    costume_dir: Arc<RwLock<Option<&'a str>>>,
+struct AppArgs {
+    costume_dir: Arc<RwLock<Option<PathBuf>>>,
     saves: Arc<Mutex<HashMap<PathBuf, CostumeSaveFile>>>,
     shutdown_flag: Arc<atomic::AtomicBool>,
     support_thread_handles: Vec<thread::JoinHandle<()>>,
@@ -521,7 +520,7 @@ struct AppArgs<'a> {
     logger: LoggerHandle,
 }
 
-impl<'a> App<'a> {
+impl App {
     fn new(
         _cc: &eframe::CreationContext,
         AppArgs {
@@ -534,11 +533,9 @@ impl<'a> App<'a> {
             scanner_tx,
             decode_job_tx,
             logger,
-        }: AppArgs<'a>,
+        }: AppArgs,
     ) -> Self
     {
-        let app_config_modal_open = costume_dir.read().unwrap().is_none();
-
         Self {
             costume_dir,
 
@@ -554,7 +551,6 @@ impl<'a> App<'a> {
             scanner_tx,
             decode_job_tx,
 
-            app_config_modal_open,
             file_exists_warning_modal_open: false,
             show_images_in_selection_list: false,
             costume_spec_edit_open: false,
@@ -609,7 +605,7 @@ impl<'a> App<'a> {
     }
 }
 
-impl eframe::App for App<'_> {
+impl eframe::App for App {
     // Gracefully shut down all our supporting threads.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.logger.log(LogLevel::Info, "signalling shutdown");
@@ -702,16 +698,6 @@ impl eframe::App for App<'_> {
                     }
                 },
             }
-        }
-
-        if self.app_config_modal_open {
-            egui::Modal::new(egui::Id::new("edit app config")).show(ctx, |ui| {
-                ui.label("hello");
-            });
-
-            // FIXME this is just temporary. Ideally we just shouldn't allow costume file ops if
-            // there's no directory selected.
-            return;
         }
 
         if self.file_exists_warning_modal_open {
@@ -854,7 +840,7 @@ impl eframe::App for App<'_> {
                     if ui.button("Save").clicked() {
                         let costume_dir = self.costume_dir.read().unwrap();
                         debug_assert!(costume_dir.is_some());
-                        let costume_dir = Path::new(costume_dir.unwrap());
+                        let costume_dir = costume_dir.as_ref().unwrap();
                         debug_assert!(costume_path.as_path().parent() == Some(costume_dir));
 
                         let old_file_path = costume_path;
@@ -1020,7 +1006,7 @@ impl eframe::App for App<'_> {
                                     return;
                                 }
 
-                                let last_modified_time = fs::metadata(costume_dir.unwrap()).unwrap().modified().unwrap();
+                                let last_modified_time = fs::metadata(costume_dir.as_ref().unwrap()).unwrap().modified().unwrap();
                                 let _ = self.scanner_tx.send(last_modified_time);
                             })();
                         }
@@ -1054,7 +1040,7 @@ impl eframe::App for App<'_> {
                         return;
                     }
 
-                    let last_modified_time = fs::metadata(costume_dir.unwrap()).unwrap().modified().unwrap();
+                    let last_modified_time = fs::metadata(costume_dir.as_ref().unwrap()).unwrap().modified().unwrap();
                     // TODO log failure
                     let _ = self.scanner_tx.send(last_modified_time);
                 }
@@ -1063,6 +1049,30 @@ impl eframe::App for App<'_> {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("Change").clicked() {
+                    // TODO I feel like this could be a bit cleaner
+                    let new_costume_dir = {
+                        let costume_dir = self.costume_dir.read().unwrap();
+                        let rfd_dir = costume_dir.as_ref().map(|pb| pb.to_str().unwrap()).unwrap_or("/");
+                        rfd::FileDialog::new()
+                            .set_directory(rfd_dir)
+                            .pick_folder()
+                    };
+                    if let Some(dir) = new_costume_dir {
+                        self.logger.log(LogLevel::Info, format!("changing costume directory to {dir:?}").as_str());
+                        self.costume_dir.write().unwrap().replace(dir);
+                    }
+                }
+
+                ui.label("Costume Directory:");
+                if let Some(dir) = self.costume_dir.read().unwrap().as_ref() {
+                    ui.label(dir.to_str().unwrap());
+                } else {
+                    ui.label("None");
+                }
+            });
+
             let prev_display_type = self.display_type;
             let prev_sort_type = self.sort_type;
             ui.horizontal(|ui| {
@@ -1283,11 +1293,11 @@ impl eframe::App for App<'_> {
 static DEFAULT_COSTUME_DIR: &str = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Champions Online\\Champions Online\\Live\\screenshots";
 
 fn main() {
-    let mut costume_dir: Option<&str> = None;
+    let mut costume_dir: Option<PathBuf> = None;
     // TODO attempt to load from saved app config on disk before defaulting
     // FIXME we should probably display this error to the user
     if fs::exists(DEFAULT_COSTUME_DIR).expect("failed to check if default costume dir exists") {
-        costume_dir.replace(DEFAULT_COSTUME_DIR);
+        costume_dir.replace(DEFAULT_COSTUME_DIR.into());
     }
     let costume_dir = Arc::new(RwLock::new(costume_dir));
 
@@ -1400,66 +1410,74 @@ fn main() {
                             continue;
                         }
 
-                        let costume_dir_lock_result = costume_dir.try_read();
-                        // FIXME we can error here if attempting to lock would block OR if the lock
-                        // is poisoned. We should probably log the case where the lock is poisoned.
-                        if costume_dir_lock_result.is_err() {
-                            thread::sleep(Duration::from_millis(100));
-                            continue;
+                        // If the UI initiated file system changes we need to know so that we don't
+                        // misidentify an external file system change.
+                        //
+                        // FIXME we might miss some messages, resulting in erroneous file system
+                        // detections. I think that because we haven't blocked trying to lock the
+                        // saves hashmap yet, the UI can still technically send messages through
+                        // this pipe AFTER the scanner thread has passed it this loop iteration...
+                        while let Ok(ui_last_modified_time) = scanner_rx.try_recv() {
+                            last_modified_time = Some(ui_last_modified_time);
                         }
 
-                        if let Some(costume_dir) = *costume_dir_lock_result.unwrap() {
-                            let mut saves = saves.lock().unwrap();
-                            let modified_time = fs::metadata(costume_dir).unwrap().modified().unwrap();
-                            // If the UI initiated file system changes we need to know so that we don't
-                            // misidentify an external file system change.
-                            while let Ok(ui_last_modified_time) = scanner_rx.try_recv() {
-                                last_modified_time = Some(ui_last_modified_time);
-                            }
-
-                            if last_modified_time.is_none_or(|lmt| modified_time != lmt) {
-                                logger.log(LogLevel::Info, "detected file system change");
-                                last_modified_time = Some(modified_time);
-                                // TODO maybe we can key the saves hashmap on Rc<Path> so that we
-                                // can do cheap clones?
-                                let mut missing_files: HashSet<PathBuf> = HashSet::from_iter(saves.keys().cloned());
-                                let mut num_new_files = 0;
-                                for entry in fs::read_dir(costume_dir).unwrap().flatten() {
-                                    // TODO check that the file starts with Costume_ and is a jpeg file. If not,
-                                    // continue. Should that logic be a part of CostumeSaveFile?
-                                    let file_path = entry.path();
-                                    #[allow(clippy::map_entry)]
-                                    if saves.contains_key(&file_path) {
-                                        missing_files.remove(file_path.as_path());
-                                    } else {
-                                        let jpeg_raw = match fs::read(entry.path()) {
-                                            Ok(contents) => contents,
-                                            Err(err) => {
-                                                logger.log(LogLevel::Warn, format!("error reading {file_path:?}: {}", err).as_str());
-                                                continue;
-                                            }
-                                        };
-
-                                        let file_stem = file_path.file_stem().unwrap();
-                                        // TODO maybe log if we failed to parse the costume save?
-                                        if let Ok(save) = CostumeSaveFile::new(file_stem.to_str().unwrap(), &jpeg_raw) {
-                                            saves.insert(file_path, save);
-                                            num_new_files += 1;
+                        let entries_to_check = (|| {
+                            // TODO cleanup
+                            // TODO use match statements to log on fs failures
+                            if let Ok(costume_dir_guard) = costume_dir.try_read() {
+                                if let Some(dir_to_read) = costume_dir_guard.as_ref() {
+                                    if let Ok(modified_time) = fs::metadata(dir_to_read).and_then(|m| m.modified()) {
+                                        if last_modified_time.is_none_or(|lmt| modified_time != lmt) {
+                                            logger.log(LogLevel::Info, "detected file system change");
+                                            last_modified_time = Some(modified_time);
+                                            return fs::read_dir(dir_to_read).ok();
                                         }
                                     }
                                 }
-                                let num_missing_files = missing_files.len();
-                                for missing_file in missing_files {
-                                    // TODO figure out if we need to explicitly forget image textures here.
-                                    saves.remove(&missing_file);
-                                }
-                                logger.log(LogLevel::Info, format!("added {num_new_files} new costumes, removed {num_missing_files} missing costumes").as_str());
-                                _ = ui_priority_message_tx.send(UiPriorityMessage::FileListChangedExternally);
-                                frame.request_repaint();
                             }
+
+                            None
+                        })();
+
+                        if let Some(entries_to_check) = entries_to_check {
+                            let mut saves = saves.lock().unwrap();
+                            let mut missing_files: HashSet<PathBuf> = HashSet::from_iter(saves.keys().cloned());
+                            let mut num_new_files = 0;
+                            for entry in entries_to_check.flatten() {
+                                // TODO check that the file starts with Costume_ and is a jpeg file. If not,
+                                // continue. Should that logic be a part of CostumeSaveFile?
+                                let file_path = entry.path();
+                                #[allow(clippy::map_entry)]
+                                if saves.contains_key(&file_path) {
+                                    missing_files.remove(file_path.as_path());
+                                } else {
+                                    let jpeg_raw = match fs::read(entry.path()) {
+                                        Ok(contents) => contents,
+                                        Err(err) => {
+                                            logger.log(LogLevel::Warn, format!("error reading {file_path:?}: {}", err).as_str());
+                                            continue;
+                                        }
+                                    };
+
+                                    let file_stem = file_path.file_stem().unwrap();
+                                    // TODO maybe log if we failed to parse the costume save?
+                                    if let Ok(save) = CostumeSaveFile::new(file_stem.to_str().unwrap(), &jpeg_raw) {
+                                        saves.insert(file_path, save);
+                                        num_new_files += 1;
+                                    }
+                                }
+                            }
+                            let num_missing_files = missing_files.len();
+                            for missing_file in missing_files {
+                                // TODO figure out if we need to explicitly forget image textures here.
+                                saves.remove(&missing_file);
+                            }
+                            logger.log(LogLevel::Info, format!("added {num_new_files} new costumes, removed {num_missing_files} missing costumes").as_str());
+                            _ = ui_priority_message_tx.send(UiPriorityMessage::FileListChangedExternally);
+                            frame.request_repaint();
                         }
 
-                        thread::sleep(Duration::from_millis(32));
+                        thread::sleep(Duration::from_millis(100));
                     }
 
                     logger.log(LogLevel::Info, "shutting down");
