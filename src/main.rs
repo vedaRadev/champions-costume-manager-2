@@ -1036,6 +1036,7 @@ impl eframe::App for App<'_> {
                             continue;
                         }
                         saves.remove(costume_path);
+                        self.logger.log(LogLevel::Info, format!("deleted {costume_path:?}").as_str());
                     }
                     self.sorted_saves = saves.keys().cloned().collect();
                     Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
@@ -1408,6 +1409,7 @@ fn main() {
                         }
 
                         if let Some(costume_dir) = *costume_dir_lock_result.unwrap() {
+                            let mut saves = saves.lock().unwrap();
                             let modified_time = fs::metadata(costume_dir).unwrap().modified().unwrap();
                             // If the UI initiated file system changes we need to know so that we don't
                             // misidentify an external file system change.
@@ -1418,7 +1420,6 @@ fn main() {
                             if last_modified_time.is_none_or(|lmt| modified_time != lmt) {
                                 logger.log(LogLevel::Info, "detected file system change");
                                 last_modified_time = Some(modified_time);
-                                let mut saves = saves.lock().unwrap();
                                 // TODO maybe we can key the saves hashmap on Rc<Path> so that we
                                 // can do cheap clones?
                                 let mut missing_files: HashSet<PathBuf> = HashSet::from_iter(saves.keys().cloned());
