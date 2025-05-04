@@ -45,6 +45,7 @@ use jpeg::{
 use eframe::egui;
 
 use std::{
+    env,
     fmt,
     error,
     io,
@@ -711,6 +712,7 @@ impl eframe::App for App {
 
         if self.costume_spec_edit_open {
             assert_eq!(self.selected_costumes.len(), 1);
+            assert!(self.costume_edit.is_some());
 
             let modal = egui::Modal::new(egui::Id::new("Costume Spec Edit"));
             modal.show(ctx, |ui| {
@@ -1055,12 +1057,18 @@ impl eframe::App for App {
                     let new_costume_dir = {
                         let costume_dir = self.costume_dir.read().unwrap();
                         let rfd_dir = costume_dir.as_ref().map(|pb| pb.to_str().unwrap()).unwrap_or("/");
+                        self.logger.log(LogLevel::Info, format!("rfd dir: {rfd_dir:?}").as_str());
                         rfd::FileDialog::new()
+                            .set_title("Select your Champions Online screenshots directory")
                             .set_directory(rfd_dir)
                             .pick_folder()
                     };
                     if let Some(dir) = new_costume_dir {
                         self.logger.log(LogLevel::Info, format!("changing costume directory to {dir:?}").as_str());
+                        if let Err(e) = fs::write(APP_CONFIG_FILE_NAME, dir.to_str().unwrap()) {
+                            // TODO should we display this error to the user?
+                            self.logger.log(LogLevel::Error, &e.to_string());
+                        }
                         self.costume_dir.write().unwrap().replace(dir);
                     }
                 }
@@ -1069,7 +1077,7 @@ impl eframe::App for App {
                 if let Some(dir) = self.costume_dir.read().unwrap().as_ref() {
                     ui.label(dir.to_str().unwrap());
                 } else {
-                    ui.label("None");
+                    ui.label("No costume directory selected");
                 }
             });
 
@@ -1290,13 +1298,18 @@ impl eframe::App for App {
 }
 
 // TODO windows-specific
-static DEFAULT_COSTUME_DIR: &str = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Champions Online\\Champions Online\\Live\\screenshots";
+const DEFAULT_COSTUME_DIR: &str = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Champions Online\\Champions Online\\Live\\screenshots";
+const APP_CONFIG_FILE_NAME: &str = "ccm_config.cfg";
 
 fn main() {
+    let exe_path = env::current_exe().expect("failed to get dir of executable");
+    env::set_current_dir(exe_path.parent().unwrap()).expect("failed to set cwd");
+
     let mut costume_dir: Option<PathBuf> = None;
-    // TODO attempt to load from saved app config on disk before defaulting
-    // FIXME we should probably display this error to the user
-    if fs::exists(DEFAULT_COSTUME_DIR).expect("failed to check if default costume dir exists") {
+    if fs::exists(APP_CONFIG_FILE_NAME).expect("failed to check if app config file exists") {
+        let app_config_bytes = fs::read(APP_CONFIG_FILE_NAME).unwrap();
+        costume_dir.replace(String::from_utf8(app_config_bytes).unwrap().into());
+    } else if fs::exists(DEFAULT_COSTUME_DIR).expect("failed to check if default costume dir exists") {
         costume_dir.replace(DEFAULT_COSTUME_DIR.into());
     }
     let costume_dir = Arc::new(RwLock::new(costume_dir));
@@ -1348,6 +1361,7 @@ fn main() {
                             continue;
                         }
                         let decode_job = decode_job_rx.lock().unwrap().recv_timeout(Duration::from_millis(32));
+
                         if let Ok(file_path) = decode_job {
                             // TODO Instead of reading the file again, maybe we should just
                             // serialize the costume and use _those_ bytes? The costume data is
