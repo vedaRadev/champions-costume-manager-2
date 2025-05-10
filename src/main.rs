@@ -1244,37 +1244,15 @@ impl eframe::App for App {
 
                             if self.selected_costumes.len() == 1 && self.selected_costumes.contains(&idx) {
                                 assert_eq!(*self.selected_costumes.iter().last().unwrap(), idx);
-                                let save_name = save.save_name.clone();
-                                let account_name = save.get_account_name();
-                                let character_name = save.get_character_name();
-                                let timestamp = save.j2000_timestamp;
-                                let costume_spec = save.get_costume_spec();
-                                let costume_hash = save.get_costume_hash();
-
-                                let account_name = account_name.to_owned();
-                                let character_name = character_name.to_owned();
-                                let costume_spec = costume_spec.to_owned();
-                                let costume_hash = costume_hash.to_owned();
-
-                                if let Some(costume_edit) = self.costume_edit.as_mut() {
-                                    costume_edit.save_name = save_name;
-                                    costume_edit.account_name = account_name;
-                                    costume_edit.character_name = character_name;
-                                    costume_edit.timestamp = timestamp;
-                                    costume_edit.strip_timestamp = false;
-                                    costume_edit.costume_spec = costume_spec;
-                                    costume_edit.costume_hash = costume_hash;
-                                } else {
-                                    self.costume_edit = Some(CostumeEdit {
-                                        save_name,
-                                        account_name,
-                                        character_name,
-                                        timestamp,
-                                        costume_spec,
-                                        costume_hash,
-                                        ..Default::default()
-                                    });
-                                }
+                                self.costume_edit = Some(CostumeEdit {
+                                    save_name: save.save_name.clone(),
+                                    account_name: save.get_account_name().to_owned(),
+                                    character_name: save.get_character_name().to_owned(),
+                                    timestamp: save.j2000_timestamp,
+                                    costume_spec: save.get_costume_spec().to_owned(),
+                                    costume_hash: save.get_costume_hash().to_owned(),
+                                    ..Default::default()
+                                });
                             }
                         }
 
@@ -1289,7 +1267,6 @@ impl eframe::App for App {
                                 save.image_texture = CostumeImage::NotLoaded;
                             }
                         }
-
                     }
                 });
             });
