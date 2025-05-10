@@ -6,11 +6,6 @@
 // too early then when we want to go through and harden the app by adding things like logging on
 // filesystem interaction failure, it might just make implementing it more of a nightmare.
 
-// TODO Make the API for getting data from the CostumeSaveFile better. It's a bit messy right now
-// because every JpegApp13Payload access returns the data we want and an RwLockReadGuard.
-// Maybe it would be better to just lock the entire app13 payload and return that, then have some
-// methods that will get the individual fields out?
-
 // TODO refactor so that the UI always loads and can display errors, even ones related to startup.
 
 // TODO Better app config / startup. Here's probably what I want to do:
@@ -143,10 +138,10 @@ fn get_file_name(save_name: &str, timestamp: Option<i64>) -> String {
 
 // TODO Error checking for things that get strings from raw bytes. Use from_utf8 instead of from_utf8_unchecked.
 // TODO Error checking wherever there's an unwrap (unless we're able to guarantee no failure ever)
-// TODO Slight refactors to DRY up code (the getters/setters have a lot in common)
 const ACCOUNT_NAME_INDEX: usize = 0;
 const CHARACTER_NAME_INDEX: usize = 1;
 const COSTUME_HASH_INDEX: usize = 2;
+const COSTUME_SPEC_INDEX: usize = 0;
 
 #[derive(Debug)]
 enum CostumeParseError {
@@ -166,6 +161,69 @@ impl std::fmt::Display for CostumeParseError {
     }
 }
 
+struct CostumeSave(Jpeg);
+
+// TODO can we coalesce UpdateCostumeMetadata and CostumeMetadata?
+// e.g. account_name: Option<Cow<'a, str>>
+// That might feel terrible to work with.
+struct CostumeMetadata<'a> {
+    account_name: &'a str,
+    character_name: &'a str,
+    hash: &'a str,
+    spec: &'a str,
+}
+
+#[derive(Default)]
+struct UpdateCostumeMetadata {
+    account_name: Option<String>,
+    character_name: Option<String>,
+    hash: Option<String>,
+    spec: Option<String>,
+}
+
+impl CostumeSave {
+    fn get_metadata(&self) -> CostumeMetadata {
+        let app13_segment = self.0.get_segment(JpegSegmentType::APP13).unwrap()[0];
+        let app13_payload = app13_segment.get_payload_as::<JpegApp13Payload>();
+        let caption_datasets = app13_payload.get_datasets(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
+        let app_object_data_preview_datasets = app13_payload.get_datasets(APP13_RECORD_APP, APP13_RECORD_APP_OBJECT_DATA_PREVIEW).unwrap();
+        // TODO nuke unsafe code in favor of safe variants, return Result to account for failures
+        CostumeMetadata {
+            account_name: unsafe { str::from_utf8_unchecked(&caption_datasets[ACCOUNT_NAME_INDEX].data) },
+            character_name: unsafe { str::from_utf8_unchecked(&caption_datasets[CHARACTER_NAME_INDEX].data) },
+            hash: unsafe { str::from_utf8_unchecked(&caption_datasets[COSTUME_HASH_INDEX].data) },
+            spec: unsafe { str::from_utf8_unchecked(&app_object_data_preview_datasets[COSTUME_SPEC_INDEX].data) },
+        }
+    }
+
+    fn update_metadata(&mut self, updates: UpdateCostumeMetadata) {
+        let app13_segment = self.0.get_segment_mut(JpegSegmentType::APP13).unwrap().swap_remove(0);
+        let app13_payload = app13_segment.get_payload_as_mut::<JpegApp13Payload>();
+
+        fn into_boxed_bytes(s: String) -> Box<[u8]> { s.into_bytes().into_boxed_slice() }
+
+        {
+            let caption_datasets = app13_payload.get_datasets_mut(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
+            if let Some(account_name) = updates.account_name.map(into_boxed_bytes) {
+                caption_datasets[ACCOUNT_NAME_INDEX].data = account_name;
+            }
+            if let Some(character_name) = updates.character_name.map(into_boxed_bytes) {
+                caption_datasets[CHARACTER_NAME_INDEX].data = character_name;
+            }
+            if let Some(hash) = updates.hash.map(into_boxed_bytes) {
+                caption_datasets[COSTUME_HASH_INDEX].data = hash;
+            }
+        }
+
+        {
+            let app_object_data_preview_datasets = app13_payload.get_datasets_mut(APP13_RECORD_APP, APP13_RECORD_APP_OBJECT_DATA_PREVIEW).unwrap();
+            if let Some(spec) = updates.spec.map(into_boxed_bytes) {
+                app_object_data_preview_datasets[0].data = spec;
+            }
+        }
+    }
+}
+
 enum CostumeImage {
     NotLoaded,
     Loading,
@@ -173,22 +231,20 @@ enum CostumeImage {
 }
 
 // TODO audit what fields we actually need.
-struct CostumeSaveFile {
-    jpeg: Jpeg,
+struct CostumeEntry {
+    /// Parsed costume jpeg save.
+    save: CostumeSave,
     /// The full name of the file.
     file_name: String,
     /// Represents how the name of the file appears in-game.
     in_game_display_name: String,
     j2000_timestamp: Option<i64>,
-    // TODO Anything below this note is a field I have stuck into this struct without much thought.
-    // There is probably a better way to organize this data.
     image_texture: CostumeImage,
     image_visible_in_grid: bool,
     image_visible_in_edit: bool,
 }
 
-#[allow(dead_code)]
-impl CostumeSaveFile {
+impl CostumeEntry {
     // TODO Don't return Box<dyn Error>, return something more specific
     // TODO save file validation
     // check the filename itself for:
@@ -207,19 +263,14 @@ impl CostumeSaveFile {
             .last().unwrap()
             .parse::<i64>().ok();
         
-        let costume_jpeg = Jpeg::parse(raw_bytes)?;
-        // TODO the following is duplicated functionality for stuff that exists on CostumeSaveFile.
-        // Seems like I may need to refactor by creating an intermediate type that wraps ONLY the
-        // Jpeg? Maybe CostumeJpeg or something? And rename this struct to CostumeEntry or something?
-        // TODO return err if no app13 segment
-        let app13 = costume_jpeg.get_segment(JpegSegmentType::APP13).unwrap()[0].get_payload_as::<JpegApp13Payload>();
-        let app_caption_datasets = app13.get_datasets(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
-        let account_name = str::from_utf8(&app_caption_datasets[ACCOUNT_NAME_INDEX].data)?;
-        let character_name = str::from_utf8(&app_caption_datasets[CHARACTER_NAME_INDEX].data)?;
-        let in_game_display_name = get_in_game_display_name(account_name, character_name, j2000_timestamp);
+        // TODO maybe move costume save validation logic into CostumeSave and provide some sort of
+        // constructor function?
+        let save = CostumeSave(Jpeg::parse(raw_bytes)?);
+        let metadata = save.get_metadata();
+        let in_game_display_name = get_in_game_display_name(metadata.account_name, metadata.character_name, j2000_timestamp);
 
         Ok(Self {
-            jpeg: costume_jpeg,
+            save,
             j2000_timestamp,
             image_texture: CostumeImage::NotLoaded,
             image_visible_in_grid: false,
@@ -247,67 +298,6 @@ impl CostumeSaveFile {
         }
     }
 
-    fn get_app13_payload(&self) -> &JpegApp13Payload {
-        let app13_segment = self.jpeg.get_segment(JpegSegmentType::APP13).unwrap()[0];
-        app13_segment.get_payload_as::<JpegApp13Payload>()
-    }
-
-    fn get_app13_payload_mut(&mut self) -> &mut JpegApp13Payload {
-        let app13_segment = self.jpeg.get_segment_mut(JpegSegmentType::APP13).unwrap().swap_remove(0);
-        app13_segment.get_payload_as_mut::<JpegApp13Payload>()
-    }
-
-    fn get_account_name(&self) -> &str {
-        let app13 = self.get_app13_payload();
-        let datasets = app13.get_datasets(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
-        let result = unsafe { std::str::from_utf8_unchecked(&datasets[ACCOUNT_NAME_INDEX].data) };
-        result
-    }
-
-    fn set_account_name(&mut self, value: String) {
-        let app13 = self.get_app13_payload_mut();
-        let datasets = app13.get_datasets_mut(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
-        datasets[ACCOUNT_NAME_INDEX].data = value.into_bytes().into_boxed_slice();
-    }
-
-    fn get_character_name(&self) -> &str {
-        let app13 = self.get_app13_payload();
-        let datasets = app13.get_datasets(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
-        let result = unsafe { std::str::from_utf8_unchecked(&datasets[CHARACTER_NAME_INDEX].data) };
-        result
-    }
-
-    fn set_character_name(&mut self, value: String) {
-        let app13 = self.get_app13_payload_mut();
-        let datasets = app13.get_datasets_mut(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
-        datasets[CHARACTER_NAME_INDEX].data = value.into_bytes().into_boxed_slice();
-    }
-
-    fn get_costume_hash(&self) -> &str {
-        let app13 = self.get_app13_payload();
-        let datasets = app13.get_datasets(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
-        let result = unsafe { std::str::from_utf8_unchecked(&datasets[COSTUME_HASH_INDEX].data) };
-        result
-    }
-
-    fn set_costume_hash(&mut self, value: String) {
-        let app13 = self.get_app13_payload_mut();
-        let datasets = app13.get_datasets_mut(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
-        datasets[COSTUME_HASH_INDEX].data = value.into_bytes().into_boxed_slice();
-    }
-
-    fn get_costume_spec(&self) -> &str {
-        let app13 = self.get_app13_payload();
-        let datasets = app13.get_datasets(APP13_RECORD_APP, APP13_RECORD_APP_OBJECT_DATA_PREVIEW).unwrap();
-        let result = unsafe { std::str::from_utf8_unchecked(&datasets[0].data) };
-        result
-    }
-
-    fn set_costume_spec(&mut self, value: String) {
-        let app13 = self.get_app13_payload_mut();
-        let datasets = app13.get_datasets_mut(APP13_RECORD_APP, APP13_RECORD_APP_OBJECT_DATA_PREVIEW).unwrap();
-        datasets[0].data = value.into_bytes().into_boxed_slice();
-    }
 }
 
 // TODO If there are many error types maybe break the types into their own enum and do this:
@@ -505,21 +495,21 @@ struct CostumeEdit {
 }
 
 impl CostumeEdit {
-    fn new_from_save(save: &CostumeSaveFile) -> Self {
-        let file_name = save.file_name.to_owned();
-        let in_game_display_name = save.in_game_display_name.to_owned();
-        let save_name = save.get_save_name().to_owned();
-        let account_name = save.get_account_name().to_owned();
-        let character_name =  save.get_character_name().to_owned();
-        let timestamp = save.j2000_timestamp;
+    fn new_from_entry(entry: &CostumeEntry) -> Self {
+        let file_name = entry.file_name.to_owned();
+        let in_game_display_name = entry.in_game_display_name.to_owned();
+        let save_name = entry.get_save_name().to_owned();
+        let timestamp = entry.j2000_timestamp;
+        let metadata = entry.save.get_metadata();
+
         Self {
             strip_timestamp: timestamp.is_none(),
             save_name,
-            account_name,
-            character_name,
             timestamp,
-            costume_spec: save.get_costume_spec().to_owned(),
-            costume_hash: save.get_costume_hash().to_owned(),
+            account_name: metadata.account_name.to_owned(),
+            character_name: metadata.character_name.to_owned(),
+            costume_spec: metadata.spec.to_owned(),
+            costume_hash: metadata.hash.to_owned(),
             file_name, 
             in_game_display_name,
         }
@@ -546,7 +536,7 @@ enum SortType { Name, CreationTime, ModifiedTime }
 struct App {
     costume_dir: Arc<RwLock<Option<PathBuf>>>,
 
-    saves: Arc<Mutex<HashMap<PathBuf, CostumeSaveFile>>>,
+    costume_entries: Arc<Mutex<HashMap<PathBuf, CostumeEntry>>>,
 
     logger: LoggerHandle,
 
@@ -576,7 +566,7 @@ struct App {
 
 struct AppArgs {
     costume_dir: Arc<RwLock<Option<PathBuf>>>,
-    saves: Arc<Mutex<HashMap<PathBuf, CostumeSaveFile>>>,
+    costume_entries: Arc<Mutex<HashMap<PathBuf, CostumeEntry>>>,
     shutdown_flag: Arc<atomic::AtomicBool>,
     support_thread_handles: Vec<thread::JoinHandle<()>>,
     ui_priority_message_rx: mpsc::Receiver<UiPriorityMessage>,
@@ -592,7 +582,7 @@ impl App {
         _cc: &eframe::CreationContext,
         AppArgs {
             costume_dir,
-            saves,
+            costume_entries,
             shutdown_flag,
             support_thread_handles,
             ui_priority_message_rx,
@@ -606,7 +596,7 @@ impl App {
         Self {
             costume_dir,
 
-            saves,
+            costume_entries,
 
             logger,
 
@@ -636,13 +626,13 @@ impl App {
     // FIXME We might need to support case-insensitive sorting on non-ascii characters, in which
     // case we'll need to use to_lowercase(). Might require more cloning than is necessary, so
     // maybe find a way to do that efficiently.
-    fn sort_saves(sort_type: SortType, display_type: DisplayType, keys_to_sort: &mut [PathBuf], locked_saves: &std::sync::MutexGuard<HashMap<PathBuf, CostumeSaveFile>>) {
+    fn sort_saves(sort_type: SortType, display_type: DisplayType, keys_to_sort: &mut [PathBuf], locked_costume_entries: &std::sync::MutexGuard<HashMap<PathBuf, CostumeEntry>>) {
         match sort_type {
             SortType::Name => {
                 match display_type {
                     DisplayType::DisplayName => {
                         keys_to_sort.sort_by_key(|k| {
-                            let save = &locked_saves[k];
+                            let save = &locked_costume_entries[k];
                             save.in_game_display_name.to_ascii_lowercase()
                         });
                     },
@@ -735,7 +725,7 @@ impl eframe::App for App {
             return;
         }
 
-        let mut saves = self.saves.lock().unwrap();
+        let mut costume_entries = self.costume_entries.lock().unwrap();
         let current_modifiers = ctx.input(|input| input.modifiers);
 
         while let Ok(priority_message) = self.ui_priority_message_rx.try_recv() {
@@ -746,8 +736,8 @@ impl eframe::App for App {
                     // file(s) the user was viewing were removed from the file system.
                     self.selected_costumes.clear();
                     self.costume_edit = None;
-                    self.sorted_saves = saves.keys().cloned().collect();
-                    Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
+                    self.sorted_saves = costume_entries.keys().cloned().collect();
+                    Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &costume_entries);
                 },
             }
         }
@@ -758,8 +748,8 @@ impl eframe::App for App {
             if message.is_err() { break; }
             match message.unwrap() {
                 UiMessage::JpegDecoded { file_path, texture_handle } => {
-                    if saves.contains_key(&file_path) {
-                        saves.get_mut(&file_path).unwrap().image_texture = CostumeImage::Loaded(texture_handle);
+                    if costume_entries.contains_key(&file_path) {
+                        costume_entries.get_mut(&file_path).unwrap().image_texture = CostumeImage::Loaded(texture_handle);
                     }
                 },
             }
@@ -792,11 +782,10 @@ impl eframe::App for App {
                     // FIXME unnecessary clone if the user hasn't changed the spec/hash and is just
                     // toggling the checkbox on/off for some reason.
                     let save_idx = self.selected_costumes.iter().last().unwrap();
-                    let save = &saves[&self.sorted_saves[*save_idx]];
-                    let costume_spec = save.get_costume_spec();
-                    let costume_hash = save.get_costume_hash();
-                    self.costume_edit.as_mut().unwrap().costume_spec = costume_spec.to_owned();
-                    self.costume_edit.as_mut().unwrap().costume_hash = costume_hash.to_owned();
+                    let entry = &costume_entries[&self.sorted_saves[*save_idx]];
+                    let CostumeMetadata { spec, hash, .. } = entry.save.get_metadata();
+                    self.costume_edit.as_mut().unwrap().costume_spec = spec.to_owned();
+                    self.costume_edit.as_mut().unwrap().costume_hash = hash.to_owned();
                 }
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -842,7 +831,7 @@ impl eframe::App for App {
                 } else if self.selected_costumes.len() == 1 {
                     // FIXME probably ultimately unnecessary clone
                     let costume_path = &self.sorted_saves[*self.selected_costumes.iter().last().unwrap()].clone();
-                    let costume = saves.get_mut(costume_path).unwrap();
+                    let costume = costume_entries.get_mut(costume_path).unwrap();
                     let costume_edit = self.costume_edit.as_mut().unwrap();
 
                     // TODO there's another place in the image grid where we do something very
@@ -924,7 +913,7 @@ impl eframe::App for App {
                         // we're NOT catching here due to Windows' case insensitivity! If we've
                         // changed the file name but saves contains the same name with a different
                         // casing, we WON'T catch it!
-                        if file_name_changed && saves.contains_key(&new_file_path) {
+                        if file_name_changed && costume_entries.contains_key(&new_file_path) {
                             self.file_exists_warning_modal_open = true;
                         } else {
                             self.logger.log(LogLevel::Info, format!("attempting to save {old_file_path:?} as {new_file_path:?}").as_str());
@@ -933,7 +922,7 @@ impl eframe::App for App {
                             // just use the `?` operator. Return a result and log if there's an
                             // error afterward.
                             (|| {
-                                let costume = saves.get_mut(costume_path).unwrap();
+                                let costume = costume_entries.get_mut(costume_path).unwrap();
                                 let mut temp_file = match fs::File::create(&temp_file_path) {
                                     Ok(file) => file,
                                     Err(err) => {
@@ -947,16 +936,19 @@ impl eframe::App for App {
                                     }
                                 };
 
-                                costume.set_account_name(costume_edit.account_name.clone());
-                                costume.set_character_name(costume_edit.character_name.clone());
-                                costume.set_costume_spec(costume_edit.costume_spec.clone());
-                                costume.set_costume_hash(costume_edit.costume_hash.clone());
+                                let updates = UpdateCostumeMetadata {
+                                    account_name: Some(costume_edit.account_name.clone()),
+                                    character_name: Some(costume_edit.character_name.clone()),
+                                    spec: Some(costume_edit.costume_spec.clone()),
+                                    hash: Some(costume_edit.costume_hash.clone()),
+                                };
+                                costume.save.update_metadata(updates);
                                 costume.in_game_display_name = costume_edit.in_game_display_name.clone();
                                 if file_name_changed {
                                     costume.file_name = costume_edit.file_name.clone();
                                     costume.j2000_timestamp = costume_edit.timestamp;
                                 }
-                                let serialized = costume.jpeg.serialize();
+                                let serialized = costume.save.0.serialize();
 
                                 if let Err(err) = temp_file.write_all(&serialized) {
                                     let costume_save_error = AppError::CostumeSaveFailed {
@@ -1054,10 +1046,10 @@ impl eframe::App for App {
                                 let (old_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| *save == old_file_path).unwrap();
                                 assert!(self.selected_costumes.remove(&old_index));
 
-                                let save = saves.remove(old_file_path).unwrap();
-                                saves.insert(new_file_path.clone(), save);
-                                self.sorted_saves = saves.keys().cloned().collect();
-                                Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
+                                let entry = costume_entries.remove(old_file_path).unwrap();
+                                costume_entries.insert(new_file_path.clone(), entry);
+                                self.sorted_saves = costume_entries.keys().cloned().collect();
+                                Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &costume_entries);
 
                                 let (new_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| **save == new_file_path).unwrap();
                                 self.selected_costumes.insert(new_index);
@@ -1090,11 +1082,11 @@ impl eframe::App for App {
                             self.logger.log(LogLevel::Error, format!("failed to delete {costume_path:?}: {err}").as_str());
                             continue;
                         }
-                        saves.remove(costume_path);
+                        costume_entries.remove(costume_path);
                         self.logger.log(LogLevel::Info, format!("deleted {costume_path:?}").as_str());
                     }
-                    self.sorted_saves = saves.keys().cloned().collect();
-                    Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
+                    self.sorted_saves = costume_entries.keys().cloned().collect();
+                    Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &costume_entries);
                     self.selected_costumes.clear();
                     // TODO find a way to compress this code since we do the exact same thing when
                     // saving files.
@@ -1166,7 +1158,7 @@ impl eframe::App for App {
             if sort_needed {
                 self.selected_costumes.clear();
                 self.selection_range_pivot = 0;
-                Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &saves);
+                Self::sort_saves(self.sort_type, self.display_type, &mut self.sorted_saves, &costume_entries);
             }
 
             ui.separator();
@@ -1196,11 +1188,11 @@ impl eframe::App for App {
                 let scroll_area_clip_rect = ui.clip_rect();
                 grid.show(ui, |ui| {
                     for (idx, save_file_name) in self.sorted_saves.iter().enumerate() {
-                        let save = saves.get_mut(save_file_name).unwrap();
+                        let entry = costume_entries.get_mut(save_file_name).unwrap();
                         let is_selected = self.selected_costumes.contains(&idx);
                         let display_name = match self.display_type {
-                            DisplayType::DisplayName => save.in_game_display_name.as_str(),
-                            DisplayType::FileName => save.file_name.as_str(),
+                            DisplayType::DisplayName => entry.in_game_display_name.as_str(),
+                            DisplayType::FileName => entry.file_name.as_str(),
                         };
 
                         let selectable_costume_item = if self.show_images_in_selection_list {
@@ -1229,7 +1221,7 @@ impl eframe::App for App {
                                     prepped.content_ui.vertical(|ui| {
                                         // TODO there's another place in the edit panel where we do something very
                                         // similar to this. Maybe find a way to pull this logic out into a function?
-                                        if let CostumeImage::Loaded(texture) = &save.image_texture {
+                                        if let CostumeImage::Loaded(texture) = &entry.image_texture {
                                             ui.add(egui::Image::new(texture).fit_to_exact_size(IMAGE_SIZE.into()));
                                         } else {
                                             ui.label("loading image...");
@@ -1255,16 +1247,16 @@ impl eframe::App for App {
                                 ui.end_row();
                             }
 
-                            save.image_visible_in_grid = scroll_area_clip_rect.intersects(custom_button.rect);
-                            if save.image_visible_in_grid && matches!(save.image_texture, CostumeImage::NotLoaded) {
+                            entry.image_visible_in_grid = scroll_area_clip_rect.intersects(custom_button.rect);
+                            if entry.image_visible_in_grid && matches!(entry.image_texture, CostumeImage::NotLoaded) {
                                 // TODO log send error
                                 _ = self.decode_job_tx.send(save_file_name.clone());
-                                save.image_texture = CostumeImage::Loading;
+                                entry.image_texture = CostumeImage::Loading;
                             }
 
                             custom_button
                         } else {
-                            save.image_visible_in_grid = false;
+                            entry.image_visible_in_grid = false;
                             let selectable_label = ui.selectable_label(is_selected, display_name);
                             ui.end_row();
                             selectable_label
@@ -1307,19 +1299,19 @@ impl eframe::App for App {
 
                             if self.selected_costumes.len() == 1 && self.selected_costumes.contains(&idx) {
                                 assert_eq!(*self.selected_costumes.iter().last().unwrap(), idx);
-                                self.costume_edit = Some(CostumeEdit::new_from_save(save));
+                                self.costume_edit = Some(CostumeEdit::new_from_entry(entry));
                             }
                         }
 
-                        save.image_visible_in_edit = self.selected_costumes.len() == 1 && self.selected_costumes.contains(&idx);
+                        entry.image_visible_in_edit = self.selected_costumes.len() == 1 && self.selected_costumes.contains(&idx);
 
                         // Forget the texture if our image is loaded but not actually visible anywhere.
                         // FIXME this is very aggressive forgetting. Maybe we only want to forget
                         // if it hasn't been visible for some number of seconds?
-                        if let CostumeImage::Loaded(texture_handle) = &save.image_texture {
-                            if !save.image_visible_in_grid && !save.image_visible_in_edit {
+                        if let CostumeImage::Loaded(texture_handle) = &entry.image_texture {
+                            if !entry.image_visible_in_grid && !entry.image_visible_in_edit {
                                 ctx.forget_image(&texture_handle.name());
-                                save.image_texture = CostumeImage::NotLoaded;
+                                entry.image_texture = CostumeImage::NotLoaded;
                             }
                         }
                     }
@@ -1435,13 +1427,13 @@ fn main() {
             // struct Something { last_modified: LastModifiedTimestamp, save: CostumeSaveFile }
             // NOTE If we do this, then we don't have to get the file metadata during sorting since
             // it'll already be here in the hashmap.
-            let saves: Arc<Mutex<HashMap<PathBuf, CostumeSaveFile>>> = Arc::new(Mutex::new(HashMap::new()));
+            let costume_entries: Arc<Mutex<HashMap<PathBuf, CostumeEntry>>> = Arc::new(Mutex::new(HashMap::new()));
             egui_extras::install_image_loaders(&cc.egui_ctx);
 
             // SCANNING THREAD
             {
                 let costume_dir = Arc::clone(&costume_dir);
-                let saves = Arc::clone(&saves);
+                let costume_entries = Arc::clone(&costume_entries);
                 let shutdown_flag = Arc::clone(&shutdown_flag);
                 let frame = cc.egui_ctx.clone();
                 let logger = LOGGER.new_handle("SCANNER");
@@ -1486,15 +1478,15 @@ fn main() {
                         })();
 
                         if let Some(entries_to_check) = entries_to_check {
-                            let mut saves = saves.lock().unwrap();
-                            let mut missing_files: HashSet<PathBuf> = HashSet::from_iter(saves.keys().cloned());
+                            let mut entries = costume_entries.lock().unwrap();
+                            let mut missing_files: HashSet<PathBuf> = HashSet::from_iter(entries.keys().cloned());
                             let mut num_new_files = 0;
                             for entry in entries_to_check.flatten() {
                                 // TODO check that the file starts with Costume_ and is a jpeg file. If not,
                                 // continue. Should that logic be a part of CostumeSaveFile?
                                 let file_path = entry.path();
                                 #[allow(clippy::map_entry)]
-                                if saves.contains_key(&file_path) {
+                                if entries.contains_key(&file_path) {
                                     missing_files.remove(file_path.as_path());
                                 } else {
                                     let jpeg_raw = match fs::read(entry.path()) {
@@ -1507,8 +1499,8 @@ fn main() {
 
                                     let file_stem = file_path.file_stem().unwrap();
                                     // TODO maybe log if we failed to parse the costume save?
-                                    if let Ok(save) = CostumeSaveFile::new(file_stem.to_str().unwrap(), &jpeg_raw) {
-                                        saves.insert(file_path, save);
+                                    if let Ok(entry) = CostumeEntry::new(file_stem.to_str().unwrap(), &jpeg_raw) {
+                                        entries.insert(file_path, entry);
                                         num_new_files += 1;
                                     }
                                 }
@@ -1516,7 +1508,7 @@ fn main() {
                             let num_missing_files = missing_files.len();
                             for missing_file in missing_files {
                                 // TODO figure out if we need to explicitly forget image textures here.
-                                saves.remove(&missing_file);
+                                entries.remove(&missing_file);
                             }
                             logger.log(LogLevel::Info, format!("added {num_new_files} new costumes, removed {num_missing_files} missing costumes").as_str());
                             _ = ui_priority_message_tx.send(UiPriorityMessage::FileListChangedExternally);
@@ -1534,7 +1526,7 @@ fn main() {
 
             let args = AppArgs {
                 costume_dir,
-                saves,
+                costume_entries,
                 shutdown_flag,
                 support_thread_handles,
                 ui_priority_message_rx,
