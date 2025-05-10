@@ -31,6 +31,13 @@
 // TODO should we verify that a costume directory is selected before performing a costume file
 // operation (e.g. save, delete)
 
+// FIXME
+// 1) select a costume
+// 2) edit the spec, save and close
+// 3) edit the spec again, uncheck the checkbox to revert the change
+// 4) can't save!
+// to fix: maybe have a "revert changes" button?
+
 mod jpeg;
 
 use jpeg::{
@@ -45,6 +52,7 @@ use jpeg::{
 use eframe::egui;
 
 use std::{
+    str,
     env,
     fmt,
     error,
@@ -164,13 +172,18 @@ enum CostumeImage {
     Loaded(egui::TextureHandle),
 }
 
-// TODO list:
-// * Maybe caching of file name as well (currently requires dynamic creation of string)?
+// TODO audit what fields we actually need.
 struct CostumeSaveFile {
     jpeg: Jpeg,
     /// The name of the save file as it appears between the "Costume_" prefix and j2000 timestamp
     /// (if included) suffix.
     save_name: String,
+    /// The full name of the file.
+    // TODO we can probably get rid of save_name and include a utility function that slices out the
+    // save_name from the file name.
+    file_name: String,
+    /// Represents how the name of the file appears in-game.
+    in_game_display_name: String,
     j2000_timestamp: Option<i64>,
     // TODO Anything below this note is a field I have stuck into this struct without much thought.
     // There is probably a better way to organize this data.
@@ -180,7 +193,6 @@ struct CostumeSaveFile {
 }
 
 #[allow(dead_code)]
-// TODO constructor that returns a result, maybe just take the file path and parse from that.
 impl CostumeSaveFile {
     // TODO Don't return Box<dyn Error>, return something more specific
     // TODO save file validation
@@ -210,13 +222,24 @@ impl CostumeSaveFile {
                 file_stem[save_name_start + 1 .. save_name_end].to_owned()
             }
         };
-        Ok(CostumeSaveFile {
+        let file_name = file_stem.to_owned();
+        
+        // TODO return err if no app13 segment
+        let app13 = costume_jpeg.get_segment(JpegSegmentType::APP13).unwrap()[0].get_payload_as::<JpegApp13Payload>();
+        let app_caption_datasets = app13.get_datasets(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
+        let account_name = str::from_utf8(&app_caption_datasets[ACCOUNT_NAME_INDEX].data)?;
+        let character_name = str::from_utf8(&app_caption_datasets[CHARACTER_NAME_INDEX].data)?;
+        let in_game_display_name = get_in_game_display_name(account_name, character_name, j2000_timestamp);
+
+        Ok(Self {
             jpeg: costume_jpeg,
             save_name,
             j2000_timestamp,
             image_texture: CostumeImage::NotLoaded,
             image_visible_in_grid: false,
             image_visible_in_edit: false,
+            file_name,
+            in_game_display_name,
         })
     }
 
@@ -462,12 +485,51 @@ enum UiMessage {
 // TODO Maybe most of this could be Cows instead of explicitly owned data?
 struct CostumeEdit {
     strip_timestamp: bool,
+
     timestamp: Option<i64>,
     save_name: String,
     account_name: String,
     character_name: String,
+
+    // These fields do not affect the indirect fields.
     costume_spec: String,
     costume_hash: String,
+
+    // Indirect fields: The follow fields aren't directly edited; they are just cached for efficiency.
+    file_name: String,
+    in_game_display_name: String,
+}
+
+impl CostumeEdit {
+    fn new_from_save(save: &CostumeSaveFile) -> Self {
+        let save_name = save.save_name.clone();
+        let account_name = save.get_account_name().to_owned();
+        let character_name =  save.get_character_name().to_owned();
+        let timestamp = save.j2000_timestamp;
+        let file_name = get_file_name(&save_name, timestamp); 
+        let in_game_display_name = get_in_game_display_name(&account_name, &character_name, timestamp);
+        Self {
+            strip_timestamp: timestamp.is_none(),
+            save_name,
+            account_name,
+            character_name,
+            timestamp,
+            costume_spec: save.get_costume_spec().to_owned(),
+            costume_hash: save.get_costume_hash().to_owned(),
+            file_name, 
+            in_game_display_name,
+        }
+    }
+
+    /// Call this to regenerate indirect fields whenever one of the following is changed:
+    /// - timestamp
+    /// - save_name
+    /// - account_name
+    /// - character_name
+    fn regenerate_indirect_fields(&mut self) {
+        self.file_name = get_file_name(&self.save_name, self.timestamp);
+        self.in_game_display_name = get_in_game_display_name(&self.account_name, &self.character_name, self.timestamp);
+    }
 }
 
 #[derive(PartialEq, Copy, Clone)]
@@ -577,9 +639,7 @@ impl App {
                     DisplayType::DisplayName => {
                         keys_to_sort.sort_by_key(|k| {
                             let save = &locked_saves[k];
-                            let account_name = save.get_account_name();
-                            let character_name = save.get_character_name();
-                            get_in_game_display_name(account_name, character_name, save.j2000_timestamp).to_ascii_lowercase()
+                            save.in_game_display_name.to_ascii_lowercase()
                         });
                     },
 
@@ -797,40 +857,44 @@ impl eframe::App for App {
                         ui.label("loading image...");
                     }
 
-                    // FIXME we probably do not want to construct the file name every frame. Maybe
-                    // cache it in the CostumeEdit struct itself?
                     ui.horizontal(|ui| {
                         ui.label("File Name:");
-                        ui.label(get_file_name(&costume_edit.save_name, costume_edit.timestamp));
+                        ui.label(&costume_edit.file_name);
                     });
-                    // FIXME again, don't want to construct this every frame
                     ui.horizontal(|ui| {
                         ui.label("In-Game Display:");
-                        ui.label(get_in_game_display_name(&costume_edit.account_name, &costume_edit.character_name, costume_edit.timestamp));
+                        ui.label(&costume_edit.in_game_display_name);
                     });
 
                     ui.separator();
 
                     ui.horizontal(|ui| {
                         ui.label("Save Name:");
-                        ui.text_edit_singleline(&mut costume_edit.save_name);
+                        if ui.text_edit_singleline(&mut costume_edit.save_name).changed() {
+                            costume_edit.regenerate_indirect_fields();
+                        }
                     });
-                    if costume.j2000_timestamp.is_some() {
-                        ui.checkbox(&mut costume_edit.strip_timestamp, "Strip Timestamp");
+                    if costume.j2000_timestamp.is_some() && ui.checkbox(&mut costume_edit.strip_timestamp, "Strip Timestamp").changed() {
                         if costume_edit.strip_timestamp {
                             costume_edit.timestamp = None;
                         } else {
                             costume_edit.timestamp = costume.j2000_timestamp;
                         }
+
+                        costume_edit.regenerate_indirect_fields();
                     }
 
                     ui.horizontal(|ui| {
                         ui.label("Account Name:");
-                        ui.text_edit_singleline(&mut costume_edit.account_name);
+                        if ui.text_edit_singleline(&mut costume_edit.account_name).changed() {
+                            costume_edit.regenerate_indirect_fields();
+                        };
                     });
                     ui.horizontal(|ui| {
                         ui.label("Character Name:");
-                        ui.text_edit_singleline(&mut costume_edit.character_name);
+                        if ui.text_edit_singleline(&mut costume_edit.character_name).changed() {
+                            costume_edit.regenerate_indirect_fields();
+                        }
                     });
                     if ui.button("Edit Spec").clicked() {
                         self.costume_spec_edit_open = true;
@@ -838,7 +902,6 @@ impl eframe::App for App {
 
                     // TODO disable button if nothing was changed?
                     // TODO if only file name was changed maybe only rename the file via OS?
-                    // FIXME Logging, not crashing!
                     if ui.button("Save").clicked() {
                         let costume_dir = self.costume_dir.read().unwrap();
                         debug_assert!(costume_dir.is_some());
@@ -846,7 +909,7 @@ impl eframe::App for App {
                         debug_assert!(costume_path.as_path().parent() == Some(costume_dir));
 
                         let old_file_path = costume_path;
-                        let new_file_path = costume_dir.join(get_file_name(&costume_edit.save_name, costume_edit.timestamp));
+                        let new_file_path = costume_dir.join(&costume_edit.file_name);
                         let mut temp_file_path = new_file_path.clone();
                         // FIXME should probably grab the current extension of new_file_path and
                         // use that to create the temp extension
@@ -884,6 +947,12 @@ impl eframe::App for App {
                                 costume.set_character_name(costume_edit.character_name.clone());
                                 costume.set_costume_spec(costume_edit.costume_spec.clone());
                                 costume.set_costume_hash(costume_edit.costume_hash.clone());
+                                costume.in_game_display_name = costume_edit.in_game_display_name.clone();
+                                if file_name_changed {
+                                    costume.save_name = costume_edit.save_name.clone();
+                                    costume.file_name = costume_edit.file_name.clone();
+                                    costume.j2000_timestamp = costume_edit.timestamp;
+                                }
                                 let serialized = costume.jpeg.serialize();
 
                                 if let Err(err) = temp_file.write_all(&serialized) {
@@ -894,11 +963,6 @@ impl eframe::App for App {
                                     };
                                     self.logger.log_err_ack_required(costume_save_error);
                                     return;
-                                }
-
-                                if file_name_changed {
-                                    costume.save_name = costume_edit.save_name.clone();
-                                    costume.j2000_timestamp = costume_edit.timestamp;
                                 }
 
                                 // Need to copy old creation time to new file
@@ -1132,12 +1196,8 @@ impl eframe::App for App {
                         let save = saves.get_mut(save_file_name).unwrap();
                         let is_selected = self.selected_costumes.contains(&idx);
                         let display_name = match self.display_type {
-                            DisplayType::DisplayName => {
-                                let account_name = save.get_account_name();
-                                let character_name = save.get_character_name();
-                                get_in_game_display_name(account_name, character_name, save.j2000_timestamp)
-                            },
-                            DisplayType::FileName => get_file_name(&save.save_name, save.j2000_timestamp),
+                            DisplayType::DisplayName => save.in_game_display_name.as_str(),
+                            DisplayType::FileName => save.file_name.as_str(),
                         };
 
                         let selectable_costume_item = if self.show_images_in_selection_list {
@@ -1244,15 +1304,7 @@ impl eframe::App for App {
 
                             if self.selected_costumes.len() == 1 && self.selected_costumes.contains(&idx) {
                                 assert_eq!(*self.selected_costumes.iter().last().unwrap(), idx);
-                                self.costume_edit = Some(CostumeEdit {
-                                    save_name: save.save_name.clone(),
-                                    account_name: save.get_account_name().to_owned(),
-                                    character_name: save.get_character_name().to_owned(),
-                                    timestamp: save.j2000_timestamp,
-                                    costume_spec: save.get_costume_spec().to_owned(),
-                                    costume_hash: save.get_costume_hash().to_owned(),
-                                    ..Default::default()
-                                });
+                                self.costume_edit = Some(CostumeEdit::new_from_save(save));
                             }
                         }
 
