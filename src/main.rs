@@ -175,12 +175,7 @@ enum CostumeImage {
 // TODO audit what fields we actually need.
 struct CostumeSaveFile {
     jpeg: Jpeg,
-    /// The name of the save file as it appears between the "Costume_" prefix and j2000 timestamp
-    /// (if included) suffix.
-    save_name: String,
     /// The full name of the file.
-    // TODO we can probably get rid of save_name and include a utility function that slices out the
-    // save_name from the file name.
     file_name: String,
     /// Represents how the name of the file appears in-game.
     in_game_display_name: String,
@@ -197,7 +192,6 @@ impl CostumeSaveFile {
     // TODO Don't return Box<dyn Error>, return something more specific
     // TODO save file validation
     // check the filename itself for:
-    // - "Costume_" prefix
     // - ".jpg" suffix?
     // check app13 for the following (do testing and see if the game cares about any of this):
     // - segment itself exists
@@ -207,23 +201,16 @@ impl CostumeSaveFile {
     // - resource name is "\0\0" 
     fn new(file_stem: &str, raw_bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
         if !file_stem.starts_with("Costume_") { return Err(Box::new(CostumeParseError::InvalidFileName)); }
+        let file_name = file_stem.to_owned();
         let j2000_timestamp = file_stem
             .split('_')
             .last().unwrap()
             .parse::<i64>().ok();
-        let costume_jpeg = Jpeg::parse(raw_bytes)?;
-        let save_name = {
-            let save_name_start = file_stem.find("_").unwrap();
-            let save_name_end = if j2000_timestamp.is_some() { file_stem.rfind("_").unwrap() } else { file_stem.len() };
-            // Technically the file name can just be "Costume_.jpg"
-            if save_name_start == save_name_end {
-                String::from("")
-            } else {
-                file_stem[save_name_start + 1 .. save_name_end].to_owned()
-            }
-        };
-        let file_name = file_stem.to_owned();
         
+        let costume_jpeg = Jpeg::parse(raw_bytes)?;
+        // TODO the following is duplicated functionality for stuff that exists on CostumeSaveFile.
+        // Seems like I may need to refactor by creating an intermediate type that wraps ONLY the
+        // Jpeg? Maybe CostumeJpeg or something? And rename this struct to CostumeEntry or something?
         // TODO return err if no app13 segment
         let app13 = costume_jpeg.get_segment(JpegSegmentType::APP13).unwrap()[0].get_payload_as::<JpegApp13Payload>();
         let app_caption_datasets = app13.get_datasets(APP13_RECORD_APP, APP13_RECORD_APP_CAPTION).unwrap();
@@ -233,7 +220,6 @@ impl CostumeSaveFile {
 
         Ok(Self {
             jpeg: costume_jpeg,
-            save_name,
             j2000_timestamp,
             image_texture: CostumeImage::NotLoaded,
             image_visible_in_grid: false,
@@ -241,6 +227,24 @@ impl CostumeSaveFile {
             file_name,
             in_game_display_name,
         })
+    }
+
+    /// Get the name of the save file as it appears between the "Costume_" prefix and j2000
+    /// timestamp (if included) suffix.
+    fn get_save_name(&self) -> &str {
+        let save_name_start = self.file_name.find("_").unwrap();
+        let save_name_end = if self.j2000_timestamp.is_some() {
+            self.file_name.rfind("_").unwrap()
+        } else {
+            self.file_name.len()
+        };
+
+        // Technically the file name can just be "Costume_.jpg"
+        if save_name_start == save_name_end {
+            ""
+        } else {
+            &self.file_name[save_name_start + 1 .. save_name_end]
+        }
     }
 
     fn get_app13_payload(&self) -> &JpegApp13Payload {
@@ -502,12 +506,12 @@ struct CostumeEdit {
 
 impl CostumeEdit {
     fn new_from_save(save: &CostumeSaveFile) -> Self {
-        let save_name = save.save_name.clone();
+        let file_name = save.file_name.to_owned();
+        let in_game_display_name = save.in_game_display_name.to_owned();
+        let save_name = save.get_save_name().to_owned();
         let account_name = save.get_account_name().to_owned();
         let character_name =  save.get_character_name().to_owned();
         let timestamp = save.j2000_timestamp;
-        let file_name = get_file_name(&save_name, timestamp); 
-        let in_game_display_name = get_in_game_display_name(&account_name, &character_name, timestamp);
         Self {
             strip_timestamp: timestamp.is_none(),
             save_name,
@@ -949,7 +953,6 @@ impl eframe::App for App {
                                 costume.set_costume_hash(costume_edit.costume_hash.clone());
                                 costume.in_game_display_name = costume_edit.in_game_display_name.clone();
                                 if file_name_changed {
-                                    costume.save_name = costume_edit.save_name.clone();
                                     costume.file_name = costume_edit.file_name.clone();
                                     costume.j2000_timestamp = costume_edit.timestamp;
                                 }
