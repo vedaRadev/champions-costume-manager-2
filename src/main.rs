@@ -722,10 +722,6 @@ impl eframe::App for App {
 
                         let old_file_path = costume_path;
                         let new_file_path = costume_dir.join(&costume_edit.file_name);
-                        let mut temp_file_path = new_file_path.clone();
-                        // FIXME should probably grab the current extension of new_file_path and
-                        // use that to create the temp extension
-                        temp_file_path.set_extension("jpg.CCM_TEMP");
                         let file_name_changed = new_file_path.file_name().unwrap() != old_file_path.file_name().unwrap();
 
                         // FIXME There is potentially a massive, terrible bug here on Windows where
@@ -740,8 +736,20 @@ impl eframe::App for App {
                             // and include additional information about the failed operation, and
                             // just use the `?` operator. Return a result and log if there's an
                             // error afterward.
+                            // TODO Clean up the error handling and maybe implement a new type
+                            // that can auto-remove or roll back temp files if the save operation
+                            // fails. There are also cases where if the save operation fails we
+                            // just leave our temp files laying around...
                             (|| {
                                 let costume = costume_entries.get_mut(costume_path).unwrap();
+                                // NOTE we use a temp file so that we're not immediately
+                                // overwriting the existing file in the case the file name hasn't
+                                // changed. If the save operation fails we don't want to lose or
+                                // corrupt the original file.
+                                let mut temp_file_path = new_file_path.clone();
+                                // FIXME should probably grab the current extension of new_file_path and
+                                // use that to create the temp extension
+                                temp_file_path.set_extension("jpg.CCM_TEMP");
                                 let mut temp_file = match fs::File::create(&temp_file_path) {
                                     Ok(file) => file,
                                     Err(err) => {
@@ -782,6 +790,9 @@ impl eframe::App for App {
                                 // Need to copy old creation time to new file
                                 #[cfg(windows)]
                                 {
+                                    // TODO should we just continue with our save operation if we
+                                    // fail to update file times? I don't think it's really _that_
+                                    // important. Maybe we can just warn.
                                     use std::os::windows::fs::FileTimesExt;
                                     let old_file = match fs::File::open(old_file_path) {
                                         Ok(file) => file,
@@ -813,7 +824,7 @@ impl eframe::App for App {
                                             let costume_save_error = AppError::CostumeSaveFailed {
                                                 which: costume_path.clone(),
                                                 source: Some(err),
-                                                message: format!("failed to get metadata for new file {new_file_path:?}"),
+                                                message: format!("failed to get metadata for temp file {temp_file_path:?}"),
                                             };
                                             self.logger.log_err_ack_required(costume_save_error);
                                             return;
@@ -836,13 +847,18 @@ impl eframe::App for App {
                                     }
                                 }
 
-                                if let Err(err) = fs::remove_file(old_file_path) {
+                                // Rename the old file so that we have something to revert to if
+                                // the temp file rename fails.
+                                let mut old_file_renamed_path = old_file_path.clone();
+                                old_file_renamed_path.set_extension("jpg.CCM_TEMP");
+                                if let Err(err) = fs::rename(old_file_path, &old_file_renamed_path) {
                                     let costume_save_error = AppError::CostumeSaveFailed {
                                         which: costume_path.clone(),
                                         source: Some(err),
-                                        message: format!("failed to remove original file {old_file_path:?}"),
+                                        message: "failed to rename original file".to_string(),
                                     };
                                     self.logger.log_err_ack_required(costume_save_error);
+                                    // TODO remove the temp file?
                                     return;
                                 }
 
@@ -853,7 +869,26 @@ impl eframe::App for App {
                                         message: "failed to rename temp file".to_string(),
                                     };
                                     self.logger.log_err_ack_required(costume_save_error);
+                                    // Revert the name of the old file
+                                    if let Err(err) = fs::rename(&old_file_renamed_path, old_file_path) {
+                                        // TODO should this be a separate app error?
+                                        let costume_save_error = AppError::CostumeSaveFailed {
+                                            which: costume_path.clone(),
+                                            source: Some(err),
+                                            message: format!(
+                                                "failed to revert old file rename ({:?} --> {:?})",
+                                                old_file_renamed_path,
+                                                old_file_path
+                                            )
+                                        };
+                                        self.logger.log_err_ack_required(costume_save_error);
+                                    }
+
                                     return;
+                                }
+
+                                if let Err(err) = fs::remove_file(&old_file_renamed_path) {
+                                    self.logger.log(LogLevel::Warn, format!("failed to remove renamed old file path: {err}").as_str());
                                 }
 
                                 self.logger.log(LogLevel::Info, format!("successfully saved {new_file_path:?}").as_str());
