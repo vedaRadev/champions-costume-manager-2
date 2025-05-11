@@ -54,9 +54,9 @@ use std::{
     io,
     num::NonZero,
     cmp::Ordering,
-    collections::{hash_map, HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     io::prelude::*,
-    path::PathBuf,
+    path::{PathBuf, Path},
     fs,
     sync::{Arc, Mutex, RwLock, atomic, mpsc, LazyLock},
     thread,
@@ -136,16 +136,32 @@ fn get_file_name(save_name: &str, timestamp: Option<i64>) -> String {
     }
 }
 
-// TODO Error checking for things that get strings from raw bytes. Use from_utf8 instead of from_utf8_unchecked.
-// TODO Error checking wherever there's an unwrap (unless we're able to guarantee no failure ever)
+fn is_valid_costume_file_name(file_path: &Path) -> bool {
+    let Some(extension) = file_path.extension().and_then(|s| s.to_str()) else { return false };
+    let Some(file_stem) = file_path.file_stem().and_then(|s| s.to_str()) else { return false };
+    file_stem.starts_with("Costume_") && extension.eq_ignore_ascii_case("jpg")
+}
+
 const ACCOUNT_NAME_INDEX: usize = 0;
 const CHARACTER_NAME_INDEX: usize = 1;
 const COSTUME_HASH_INDEX: usize = 2;
 const COSTUME_SPEC_INDEX: usize = 0;
 
+static EXPECTED_APP13_SEGMENT_ID: &str = "Photoshop 3.0\0";
+static EXPECTED_APP13_RESOURCE_TYPE: &[u8; 4] = b"8BIM";
+const EXPECTED_APP13_RESOURCE_ID: u16 = 0x0404;
+static EXPECTED_APP13_RESOURCE_NAME: &str = "\0\0";
+
 #[derive(Debug)]
 enum CostumeParseError {
+    #[allow(dead_code)]
     InvalidFileName,
+    InvalidApp13SegmentCount { count: usize },
+    InvalidApp13SegmentId { actual: Box<[u8]> },
+    InvalidApp13ResourceType { actual: u32 },
+    InvalidApp13ResourceId { actual: u16 },
+    InvalidApp13ResourceName { actual: Box<[u8]> },
+    JpegParseError(jpeg::ParseError),
 }
 
 impl std::error::Error for CostumeParseError {}
@@ -153,10 +169,26 @@ impl std::error::Error for CostumeParseError {}
 impl std::fmt::Display for CostumeParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::InvalidFileName => write!(
+            Self::InvalidFileName => write!(f, "Invalid file name"),
+            Self::InvalidApp13SegmentCount { count } => write!(f, "Invalid App13 segment count: expected 1 but found {count}"),
+            Self::InvalidApp13SegmentId { actual } => write!(
                 f,
-                "Invalid file name"
+                "Invalid App13 segment id: expected {EXPECTED_APP13_SEGMENT_ID:?} but found {:?}",
+                unsafe { str::from_utf8_unchecked(actual) }
             ),
+            Self::InvalidApp13ResourceType { actual } => write!(
+                f,
+                "Invalid App13 resource type: expected {:?} but found {:?}",
+                unsafe { str::from_utf8_unchecked(EXPECTED_APP13_RESOURCE_TYPE) },
+                unsafe { str::from_utf8_unchecked(&actual.to_be_bytes()) },
+            ),
+            Self::InvalidApp13ResourceId { actual } => write!(f, "Invalid App13 resource id: expected {EXPECTED_APP13_RESOURCE_ID:#06X} but found {actual:#06X}"),
+            Self::InvalidApp13ResourceName { actual } => write!(
+                f,
+                "Invalid App13 resource name: expected {EXPECTED_APP13_RESOURCE_NAME:?} but found {:?}",
+                unsafe { str::from_utf8_unchecked(actual) },
+            ),
+            Self::JpegParseError(parse_error) => write!(f, "Failed to parse jpeg: {parse_error}"),
         }
     }
 }
@@ -182,6 +214,33 @@ struct UpdateCostumeMetadata {
 }
 
 impl CostumeSave {
+    fn parse(bytes: &[u8]) -> Result<Self, CostumeParseError> {
+        let jpeg = Jpeg::parse(bytes).map_err(CostumeParseError::JpegParseError)?;
+        let app13_segments = jpeg.get_segment(JpegSegmentType::APP13).ok_or(CostumeParseError::InvalidApp13SegmentCount { count: 0 })?;
+        if app13_segments.len() != 1 { return Err(CostumeParseError::InvalidApp13SegmentCount { count: app13_segments.len() }); }
+        let app13_segment = app13_segments[0].get_payload_as::<JpegApp13Payload>();
+
+        // NOTE The following checks might be too restrictive. Additional testing should be done to
+        // see if Champions Online will load costume saves whose App13 segment payloads have
+        // different values. If it will, then some of these validations should be removed.
+        if &*app13_segment.id != EXPECTED_APP13_SEGMENT_ID.as_bytes() {
+            return Err(CostumeParseError::InvalidApp13SegmentId { actual: app13_segment.id.clone() });
+        }
+        if app13_segment.resource_type != u32::from_be_bytes(*EXPECTED_APP13_RESOURCE_TYPE) {
+            return Err(CostumeParseError::InvalidApp13ResourceType { actual: app13_segment.resource_type });
+        }
+        if app13_segment.resource_id != EXPECTED_APP13_RESOURCE_ID {
+            return Err(CostumeParseError::InvalidApp13ResourceId { actual: app13_segment.resource_id });
+        }
+        if &*app13_segment.resource_name != EXPECTED_APP13_RESOURCE_NAME.as_bytes() {
+            return Err(CostumeParseError::InvalidApp13ResourceName { actual: app13_segment.resource_name.clone() });
+        }
+
+        // TODO validate that the costume hash matches a hash of the spec?
+
+        Ok(Self(jpeg))
+    }
+
     fn get_metadata(&self) -> CostumeMetadata {
         let app13_segment = self.0.get_segment(JpegSegmentType::APP13).unwrap()[0];
         let app13_payload = app13_segment.get_payload_as::<JpegApp13Payload>();
@@ -234,7 +293,7 @@ enum CostumeImage {
 struct CostumeEntry {
     /// Parsed costume jpeg save.
     save: CostumeSave,
-    /// The full name of the file.
+    /// The full name of the file including the extension.
     file_name: String,
     /// Represents how the name of the file appears in-game.
     in_game_display_name: String,
@@ -245,31 +304,16 @@ struct CostumeEntry {
 }
 
 impl CostumeEntry {
-    // TODO Don't return Box<dyn Error>, return something more specific
-    // TODO save file validation
-    // check the filename itself for:
-    // - ".jpg" suffix?
-    // check app13 for the following (do testing and see if the game cares about any of this):
-    // - segment itself exists
-    // - identifier is "Photoshop 3.0\0"
-    // - resource type is "8BIM" (as a u32)
-    // - resource id is 0x0404
-    // - resource name is "\0\0" 
-    fn new(file_stem: &str, raw_bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
-        if !file_stem.starts_with("Costume_") { return Err(Box::new(CostumeParseError::InvalidFileName)); }
-        let file_name = file_stem.to_owned();
-        let j2000_timestamp = file_stem
+    fn new(file_path: &Path, save: CostumeSave) -> Self {
+        let file_name = file_path.file_name().unwrap().to_str().unwrap().to_owned();
+        let j2000_timestamp = file_path.file_stem().unwrap().to_str().unwrap()
             .split('_')
             .last().unwrap()
             .parse::<i64>().ok();
-        
-        // TODO maybe move costume save validation logic into CostumeSave and provide some sort of
-        // constructor function?
-        let save = CostumeSave(Jpeg::parse(raw_bytes)?);
         let metadata = save.get_metadata();
         let in_game_display_name = get_in_game_display_name(metadata.account_name, metadata.character_name, j2000_timestamp);
 
-        Ok(Self {
+        Self {
             save,
             j2000_timestamp,
             image_texture: CostumeImage::NotLoaded,
@@ -277,17 +321,17 @@ impl CostumeEntry {
             image_visible_in_edit: false,
             file_name,
             in_game_display_name,
-        })
+        }
     }
 
-    /// Get the name of the save file as it appears between the "Costume_" prefix and j2000
-    /// timestamp (if included) suffix.
+    /// Get the name of the save file as it appears between the "Costume_" prefix and either the
+    /// j2000 timestamp suffix (if included) or the file extension.
     fn get_save_name(&self) -> &str {
         let save_name_start = self.file_name.find("_").unwrap();
         let save_name_end = if self.j2000_timestamp.is_some() {
             self.file_name.rfind("_").unwrap()
         } else {
-            self.file_name.len()
+            self.file_name.rfind(".").unwrap()
         };
 
         // Technically the file name can just be "Costume_.jpg"
@@ -476,7 +520,6 @@ enum UiMessage {
 }
 
 #[derive(Default)]
-// TODO Maybe most of this could be Cows instead of explicitly owned data?
 struct CostumeEdit {
     strip_timestamp: bool,
 
@@ -843,7 +886,6 @@ impl eframe::App for App {
                         ui.add(image);
                     } else {
                         if matches!(costume.image_texture, CostumeImage::NotLoaded) {
-                            // TODO log and send error
                             _ = self.decode_job_tx.send(costume_path.clone());
                             costume.image_texture = CostumeImage::Loading;
                         }
@@ -1102,7 +1144,6 @@ impl eframe::App for App {
                     }
 
                     let last_modified_time = fs::metadata(costume_dir.as_ref().unwrap()).unwrap().modified().unwrap();
-                    // TODO log failure
                     let _ = self.scanner_tx.send(last_modified_time);
                 }
             }
@@ -1249,7 +1290,6 @@ impl eframe::App for App {
 
                             entry.image_visible_in_grid = scroll_area_clip_rect.intersects(custom_button.rect);
                             if entry.image_visible_in_grid && matches!(entry.image_texture, CostumeImage::NotLoaded) {
-                                // TODO log send error
                                 _ = self.decode_job_tx.send(save_file_name.clone());
                                 entry.image_texture = CostumeImage::Loading;
                             }
@@ -1321,7 +1361,7 @@ impl eframe::App for App {
     }
 }
 
-// TODO windows-specific
+// FIXME this directory is windows-specific
 const DEFAULT_COSTUME_DIR: &str = "C:\\Program Files (x86)\\Steam\\steamapps\\common\\Champions Online\\Champions Online\\Live\\screenshots";
 const APP_CONFIG_FILE_NAME: &str = "ccm_config.cfg";
 
@@ -1482,14 +1522,12 @@ fn main() {
                             let mut missing_files: HashSet<PathBuf> = HashSet::from_iter(costume_entries.keys().cloned());
                             let mut num_new_files = 0;
                             for directory_entry in directory_entries_to_check.flatten() {
-                                // TODO check that the file starts with Costume_ and is a jpeg file. If not,
-                                // continue. Should that logic be a part of CostumeSaveFile?
                                 let file_path = directory_entry.path();
                                 #[allow(clippy::map_entry)]
                                 if costume_entries.contains_key(&file_path) {
                                     missing_files.remove(file_path.as_path());
-                                } else {
-                                    let jpeg_raw = match fs::read(directory_entry.path()) {
+                                } else if is_valid_costume_file_name(&file_path) {
+                                    let jpeg_raw = match fs::read(&file_path) {
                                         Ok(contents) => contents,
                                         Err(err) => {
                                             logger.log(LogLevel::Warn, format!("error reading {file_path:?}: {}", err).as_str());
@@ -1497,12 +1535,17 @@ fn main() {
                                         }
                                     };
 
-                                    let file_stem = file_path.file_stem().unwrap();
-                                    // TODO maybe log if we failed to parse the costume save?
-                                    if let Ok(entry) = CostumeEntry::new(file_stem.to_str().unwrap(), &jpeg_raw) {
-                                        costume_entries.insert(file_path, entry);
-                                        num_new_files += 1;
-                                    }
+                                    let save = match CostumeSave::parse(&jpeg_raw) {
+                                        Ok(parsed) => parsed,
+                                        Err(err) => {
+                                            logger.log(LogLevel::Warn, format!("failed to parse save file {file_path:?}: {}", err).as_str());
+                                            continue;
+                                        }
+                                    };
+
+                                    let costume_entry = CostumeEntry::new(&file_path, save);
+                                    costume_entries.insert(file_path, costume_entry);
+                                    num_new_files += 1;
                                 }
                             }
                             let num_missing_files = missing_files.len();

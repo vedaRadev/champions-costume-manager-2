@@ -455,7 +455,7 @@ impl Jpeg {
                         payload: Some(payload),
                         additional_data: Some(image_data.into_boxed_slice())
                     });
-                    parsed.segment_indices.entry(segment_type).and_modify(|v| v.push(index)).or_insert(vec![index]);
+                    parsed.segment_indices.entry(segment_type).or_default().push(index);
                 },
 
                 // Because some fields in the APP13 header are variable length we need to make sure
@@ -543,7 +543,7 @@ impl Jpeg {
                         payload: Some(payload),
                         additional_data: None,
                     });
-                    parsed.segment_indices.entry(segment_type).and_modify(|v| v.push(index)).or_insert(vec![index]);
+                    parsed.segment_indices.entry(segment_type).or_default().push(index);
 
                     // remember that the whole app 13 segment payload is padded to be an even size
                     // NOTE I think this may only work so long as the underlying buffer contains
