@@ -54,7 +54,7 @@ use std::{
     io,
     num::NonZero,
     cmp::Ordering,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{hash_map, HashMap, HashSet, VecDeque},
     io::prelude::*,
     path::PathBuf,
     fs,
@@ -1459,7 +1459,7 @@ fn main() {
                             last_modified_time = Some(ui_last_modified_time);
                         }
 
-                        let entries_to_check = (|| {
+                        let directory_entries_to_check = (|| {
                             // TODO cleanup
                             // TODO use match statements to log on fs failures
                             if let Ok(costume_dir_guard) = costume_dir.try_read() {
@@ -1477,19 +1477,19 @@ fn main() {
                             None
                         })();
 
-                        if let Some(entries_to_check) = entries_to_check {
-                            let mut entries = costume_entries.lock().unwrap();
-                            let mut missing_files: HashSet<PathBuf> = HashSet::from_iter(entries.keys().cloned());
+                        if let Some(directory_entries_to_check) = directory_entries_to_check {
+                            let mut costume_entries = costume_entries.lock().unwrap();
+                            let mut missing_files: HashSet<PathBuf> = HashSet::from_iter(costume_entries.keys().cloned());
                             let mut num_new_files = 0;
-                            for entry in entries_to_check.flatten() {
+                            for directory_entry in directory_entries_to_check.flatten() {
                                 // TODO check that the file starts with Costume_ and is a jpeg file. If not,
                                 // continue. Should that logic be a part of CostumeSaveFile?
-                                let file_path = entry.path();
+                                let file_path = directory_entry.path();
                                 #[allow(clippy::map_entry)]
-                                if entries.contains_key(&file_path) {
+                                if costume_entries.contains_key(&file_path) {
                                     missing_files.remove(file_path.as_path());
                                 } else {
-                                    let jpeg_raw = match fs::read(entry.path()) {
+                                    let jpeg_raw = match fs::read(directory_entry.path()) {
                                         Ok(contents) => contents,
                                         Err(err) => {
                                             logger.log(LogLevel::Warn, format!("error reading {file_path:?}: {}", err).as_str());
@@ -1500,7 +1500,7 @@ fn main() {
                                     let file_stem = file_path.file_stem().unwrap();
                                     // TODO maybe log if we failed to parse the costume save?
                                     if let Ok(entry) = CostumeEntry::new(file_stem.to_str().unwrap(), &jpeg_raw) {
-                                        entries.insert(file_path, entry);
+                                        costume_entries.insert(file_path, entry);
                                         num_new_files += 1;
                                     }
                                 }
@@ -1508,7 +1508,7 @@ fn main() {
                             let num_missing_files = missing_files.len();
                             for missing_file in missing_files {
                                 // TODO figure out if we need to explicitly forget image textures here.
-                                entries.remove(&missing_file);
+                                costume_entries.remove(&missing_file);
                             }
                             logger.log(LogLevel::Info, format!("added {num_new_files} new costumes, removed {num_missing_files} missing costumes").as_str());
                             _ = ui_priority_message_tx.send(UiPriorityMessage::FileListChangedExternally);
