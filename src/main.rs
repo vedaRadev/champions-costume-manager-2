@@ -849,9 +849,9 @@ impl eframe::App for App {
 
                                 // Rename the old file so that we have something to revert to if
                                 // the temp file rename fails.
-                                let mut old_file_renamed_path = old_file_path.clone();
-                                old_file_renamed_path.set_extension("jpg.CCM_TEMP");
-                                if let Err(err) = fs::rename(old_file_path, &old_file_renamed_path) {
+                                let mut old_file_backup_path = old_file_path.clone();
+                                old_file_backup_path.set_extension("jpg.CCM_BAK");
+                                if let Err(err) = fs::rename(old_file_path, &old_file_backup_path) {
                                     let costume_save_error = AppError::CostumeSaveFailed {
                                         which: costume_path.clone(),
                                         source: Some(err),
@@ -870,14 +870,14 @@ impl eframe::App for App {
                                     };
                                     self.logger.log_err_ack_required(costume_save_error);
                                     // Revert the name of the old file
-                                    if let Err(err) = fs::rename(&old_file_renamed_path, old_file_path) {
+                                    if let Err(err) = fs::rename(&old_file_backup_path, old_file_path) {
                                         // TODO should this be a separate app error?
                                         let costume_save_error = AppError::CostumeSaveFailed {
                                             which: costume_path.clone(),
                                             source: Some(err),
                                             message: format!(
-                                                "failed to revert old file rename ({:?} --> {:?})",
-                                                old_file_renamed_path,
+                                                "failed to revert old file backup rename ({:?} --> {:?})",
+                                                old_file_backup_path,
                                                 old_file_path
                                             )
                                         };
@@ -887,7 +887,7 @@ impl eframe::App for App {
                                     return;
                                 }
 
-                                if let Err(err) = fs::remove_file(&old_file_renamed_path) {
+                                if let Err(err) = fs::remove_file(&old_file_backup_path) {
                                     self.logger.log(LogLevel::Warn, format!("failed to remove renamed old file path: {err}").as_str());
                                 }
 
