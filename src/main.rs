@@ -747,7 +747,7 @@ impl eframe::App for App {
                             // error afterward.
                             // TODO find a way to ergonomically (and efficiently) compress all the
                             // error cleanup code.
-                            (|| {
+                            let successfully_saved = (|| {
                                 {
                                     let costume = costume_entries.get_mut(costume_path).unwrap();
                                     // NOTE we use a temp file so that we're not immediately
@@ -767,7 +767,7 @@ impl eframe::App for App {
                                                 message: format!("failed to open temp file {temp_file_path:?}"),
                                             };
                                             self.logger.log_err_ack_required(costume_save_error);
-                                            return;
+                                            return false;
                                         }
                                     };
 
@@ -814,7 +814,7 @@ impl eframe::App for App {
                                         // END CLEANUP
                                         //
 
-                                        return;
+                                        return false;
                                     }
 
                                     // Need to copy old creation time to new file
@@ -903,7 +903,7 @@ impl eframe::App for App {
                                         // END CLEANUP
                                         //
                                        
-                                        return;
+                                        return false;
                                     }
 
                                     if let Err(err) = fs::rename(&temp_file_path, &new_file_path) {
@@ -951,7 +951,7 @@ impl eframe::App for App {
                                         // END CLEANUP
                                         //
 
-                                        return;
+                                        return false;
                                     }
 
                                     if let Err(err) = fs::remove_file(&old_file_backup_path) {
@@ -959,8 +959,29 @@ impl eframe::App for App {
                                     }
 
                                     self.logger.log(LogLevel::Info, format!("successfully saved {new_file_path:?}").as_str());
-                                }
 
+                                    true
+                                }
+                            })();
+
+                            // NOTE we should always inform the scanning thread that we potentially
+                            // updated the costume directory, even if the save was a failure (and
+                            // even if it was such a failure that we didn't actually make any
+                            // changes to the directory).
+
+                            // TODO find a way to compress this code since we do the exact same thing when
+                            // deleting files.
+
+                            // Signal to the scanning thread that we initiated the file system change.
+                            // This avoids cases where we update the file system, react to the update,
+                            // then the scanner sees that something was changed and gives us ANOTHER
+                            // notification that the file system was changed.
+                            let costume_dir = self.costume_dir.read().unwrap();
+                            debug_assert!(costume_dir.is_some());
+                            let last_modified_time = costume_dir.as_ref().unwrap().metadata().unwrap().modified().unwrap();
+                            let _ = self.scanner_tx.send(last_modified_time);
+
+                            if successfully_saved {
                                 // FIXME really lazy and inefficient. I don't think we can know where the new
                                 // save name will be after sorting (maybe we actually can) but we can probably
                                 // pass along the index of the old save with this event. Would eliminate an
@@ -975,23 +996,7 @@ impl eframe::App for App {
 
                                 let (new_index, _) = self.sorted_saves.iter().enumerate().find(|(_, save)| **save == new_file_path).unwrap();
                                 self.selected_costumes.insert(new_index);
-
-                                // TODO find a way to compress this code since we do the exact same thing when
-                                // deleting files.
-
-                                // Signal to the scanning thread that we initiated the file system change.
-                                // This avoids cases where we update the file system, react to the update,
-                                // then the scanner sees that something was changed and gives us ANOTHER
-                                // notification that the file system was changed.
-                                let costume_dir = self.costume_dir.read().unwrap();
-                                if costume_dir.is_none() {
-                                    self.logger.log(LogLevel::Warn, "somehow we performed a costume file operation with no costume directory selected");
-                                    return;
-                                }
-
-                                let last_modified_time = fs::metadata(costume_dir.as_ref().unwrap()).unwrap().modified().unwrap();
-                                let _ = self.scanner_tx.send(last_modified_time);
-                            })();
+                            }
                         }
                     }
                 }
@@ -1018,12 +1023,8 @@ impl eframe::App for App {
                     // then the scanner sees that something was changed and gives us ANOTHER
                     // notification that the file system was changed.
                     let costume_dir = self.costume_dir.read().unwrap();
-                    if costume_dir.is_none() {
-                        self.logger.log(LogLevel::Warn, "somehow we performed a costume file operation with no costume directory selected");
-                        return;
-                    }
-
-                    let last_modified_time = fs::metadata(costume_dir.as_ref().unwrap()).unwrap().modified().unwrap();
+                    debug_assert!(costume_dir.is_some());
+                    let last_modified_time = costume_dir.as_ref().unwrap().metadata().unwrap().modified().unwrap();
                     let _ = self.scanner_tx.send(last_modified_time);
                 }
             }
