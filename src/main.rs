@@ -85,7 +85,7 @@ impl CostumeEntry {
         let file_name = file_path.file_name().unwrap().to_str().unwrap().to_owned();
         let j2000_timestamp = file_path.file_stem().unwrap().to_str().unwrap()
             .split('_')
-            .last().unwrap()
+            .next_back().unwrap()
             .parse::<i64>().ok();
         let metadata = save.get_metadata();
         let in_game_display_name = costume::get_in_game_display_name(metadata.account_name, metadata.character_name, j2000_timestamp);
