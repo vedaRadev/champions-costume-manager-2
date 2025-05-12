@@ -142,6 +142,18 @@ pub struct CostumeMetadata<'a> {
     pub spec: &'a str,
 }
 
+impl<'a> CostumeMetadata<'a> {
+    /// Create an instance of UpdateCostumeMetadata by cloning each field.
+    pub fn create_update(&self) -> UpdateCostumeMetadata {
+        UpdateCostumeMetadata {
+            account_name: Some(self.account_name.to_owned()),
+            character_name: Some(self.character_name.to_owned()),
+            hash: Some(self.hash.to_owned()),
+            spec: Some(self.spec.to_owned()),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct UpdateCostumeMetadata {
     pub account_name: Option<String>,
