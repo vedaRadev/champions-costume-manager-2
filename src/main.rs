@@ -748,220 +748,218 @@ impl eframe::App for App {
                             // TODO find a way to ergonomically (and efficiently) compress all the
                             // error cleanup code.
                             let successfully_saved = (|| {
-                                {
-                                    let costume = costume_entries.get_mut(costume_path).unwrap();
-                                    // NOTE we use a temp file so that we're not immediately
-                                    // overwriting the existing file in the case the file name hasn't
-                                    // changed. If the save operation fails we don't want to lose or
-                                    // corrupt the original file.
-                                    let mut temp_file_path = new_file_path.clone();
-                                    // FIXME should probably grab the current extension of new_file_path and
-                                    // use that to create the temp extension
-                                    temp_file_path.set_extension("jpg.CCM_TEMP");
-                                    let mut temp_file = match fs::File::create(&temp_file_path) {
-                                        Ok(file) => file,
-                                        Err(err) => {
-                                            let costume_save_error = AppError::CostumeSaveFailed {
-                                                which: costume_path.clone(),
-                                                source: Some(err),
-                                                message: format!("failed to open temp file {temp_file_path:?}"),
-                                            };
-                                            self.logger.log_err_ack_required(costume_save_error);
-                                            return false;
-                                        }
-                                    };
-
-                                    let original_metadata = costume.save.get_metadata().create_update();
-                                    let original_file_name = costume.file_name.clone();
-                                    let original_in_game_display_name = costume.in_game_display_name.clone();
-                                    let original_timestamp = costume.j2000_timestamp;
-
-                                    costume.save.update_metadata(costume_edit.create_update());
-                                    costume.in_game_display_name = costume_edit.in_game_display_name.clone();
-                                    if file_name_changed {
-                                        costume.file_name = costume_edit.file_name.clone();
-                                        costume.j2000_timestamp = costume_edit.timestamp;
-                                    }
-                                    
-                                    let serialized = costume.save.0.serialize();
-                                    if let Err(err) = temp_file.write_all(&serialized) {
+                                let costume = costume_entries.get_mut(costume_path).unwrap();
+                                // NOTE we use a temp file so that we're not immediately
+                                // overwriting the existing file in the case the file name hasn't
+                                // changed. If the save operation fails we don't want to lose or
+                                // corrupt the original file.
+                                let mut temp_file_path = new_file_path.clone();
+                                // FIXME should probably grab the current extension of new_file_path and
+                                // use that to create the temp extension
+                                temp_file_path.set_extension("jpg.CCM_TEMP");
+                                let mut temp_file = match fs::File::create(&temp_file_path) {
+                                    Ok(file) => file,
+                                    Err(err) => {
                                         let costume_save_error = AppError::CostumeSaveFailed {
                                             which: costume_path.clone(),
                                             source: Some(err),
-                                            message: format!("failed to write temp file {temp_file_path:?}"),
+                                            message: format!("failed to open temp file {temp_file_path:?}"),
                                         };
                                         self.logger.log_err_ack_required(costume_save_error);
-
-                                        //
-                                        // BEGIN CLEANUP
-                                        //
-
-                                        // DELETE TEMP FILE
-                                        if let Err(err) = fs::remove_file(&temp_file_path) {
-                                            self.logger.log(
-                                                LogLevel::Warn,
-                                                format!("failed to remove temp file {temp_file_path:?} after costume save failure: {err}").as_str()
-                                            );
-                                        }
-
-                                        // REVERT COSTUME CHANGES
-                                        costume.save.update_metadata(original_metadata);
-                                        costume.file_name = original_file_name;
-                                        costume.in_game_display_name = original_in_game_display_name;
-                                        costume.j2000_timestamp = original_timestamp;
-
-                                        //
-                                        // END CLEANUP
-                                        //
-
                                         return false;
                                     }
+                                };
 
-                                    // Need to copy old creation time to new file
-                                    #[cfg(windows)]
-                                    {
-                                        (|| {
-                                            // NOTE Failure to update file times does NOT abort the
-                                            // save process. It's not ideal but we can still continue.
-                                            use std::os::windows::fs::FileTimesExt;
-                                            let old_file = match fs::File::open(old_file_path) {
-                                                Ok(file) => file,
-                                                Err(err) => {
-                                                    self.logger.log(
-                                                        LogLevel::Warn,
-                                                        format!("failed to update file times: failed to open original file {old_file_path:?}: {err}").as_str(),
-                                                    );
-                                                    return;
-                                                }
-                                            };
-                                            let old_metadata = match old_file.metadata() {
-                                                Ok(metadata) => metadata,
-                                                Err(err) => {
-                                                    self.logger.log(
-                                                        LogLevel::Warn,
-                                                        format!("failed to update file times: failed to get metadata for original file {old_file_path:?}: {err}").as_str(),
-                                                    );
-                                                    return;
-                                                },
-                                            };
-                                            let new_metadata = match temp_file.metadata() {
-                                                Ok(metadata) => metadata,
-                                                Err(err) => {
-                                                    self.logger.log(
-                                                        LogLevel::Warn,
-                                                        format!("failed to update file times: failed to get metadata for temp file {temp_file_path:?}: {err}").as_str(),
-                                                    );
-                                                    return;
-                                                },
-                                            };
-                                            // SAFETY: This section is conditionally compiled for windows so
-                                            // setting/getting the file creation time should not error.
-                                            let times = fs::FileTimes::new()
-                                                .set_created(old_metadata.created().unwrap())
-                                                .set_accessed(new_metadata.accessed().unwrap())
-                                                .set_modified(new_metadata.modified().unwrap());
-                                            if let Err(err) = temp_file.set_times(times) {
+                                let original_metadata = costume.save.get_metadata().create_update();
+                                let original_file_name = costume.file_name.clone();
+                                let original_in_game_display_name = costume.in_game_display_name.clone();
+                                let original_timestamp = costume.j2000_timestamp;
+
+                                costume.save.update_metadata(costume_edit.create_update());
+                                costume.in_game_display_name = costume_edit.in_game_display_name.clone();
+                                if file_name_changed {
+                                    costume.file_name = costume_edit.file_name.clone();
+                                    costume.j2000_timestamp = costume_edit.timestamp;
+                                }
+
+                                let serialized = costume.save.0.serialize();
+                                if let Err(err) = temp_file.write_all(&serialized) {
+                                    let costume_save_error = AppError::CostumeSaveFailed {
+                                        which: costume_path.clone(),
+                                        source: Some(err),
+                                        message: format!("failed to write temp file {temp_file_path:?}"),
+                                    };
+                                    self.logger.log_err_ack_required(costume_save_error);
+
+                                    //
+                                    // BEGIN CLEANUP
+                                    //
+
+                                    // DELETE TEMP FILE
+                                    if let Err(err) = fs::remove_file(&temp_file_path) {
+                                        self.logger.log(
+                                            LogLevel::Warn,
+                                            format!("failed to remove temp file {temp_file_path:?} after costume save failure: {err}").as_str()
+                                        );
+                                    }
+
+                                    // REVERT COSTUME CHANGES
+                                    costume.save.update_metadata(original_metadata);
+                                    costume.file_name = original_file_name;
+                                    costume.in_game_display_name = original_in_game_display_name;
+                                    costume.j2000_timestamp = original_timestamp;
+
+                                    //
+                                    // END CLEANUP
+                                    //
+
+                                    return false;
+                                }
+
+                                // Need to copy old creation time to new file
+                                #[cfg(windows)]
+                                {
+                                    (|| {
+                                        // NOTE Failure to update file times does NOT abort the
+                                        // save process. It's not ideal but we can still continue.
+                                        use std::os::windows::fs::FileTimesExt;
+                                        let old_file = match fs::File::open(old_file_path) {
+                                            Ok(file) => file,
+                                            Err(err) => {
                                                 self.logger.log(
                                                     LogLevel::Warn,
-                                                    format!("failed to update file times: failed to set times for {temp_file_path:?}: {err}").as_str(),
+                                                    format!("failed to update file times: failed to open original file {old_file_path:?}: {err}").as_str(),
                                                 );
+                                                return;
                                             }
-                                        })();
-                                    }
-
-                                    // Rename the old file so that we have something to revert to if
-                                    // the temp file rename fails.
-                                    let mut old_file_backup_path = old_file_path.clone();
-                                    old_file_backup_path.set_extension("jpg.CCM_BAK");
-                                    if let Err(err) = fs::rename(old_file_path, &old_file_backup_path) {
-                                        let costume_save_error = AppError::CostumeSaveFailed {
-                                            which: costume_path.clone(),
-                                            source: Some(err),
-                                            message: "failed to rename original file".to_string(),
                                         };
-                                        self.logger.log_err_ack_required(costume_save_error);
-                                        
-                                        //
-                                        // BEGIN CLEANUP
-                                        //
-
-                                        // DELETE TEMP FILE
-                                        if let Err(err) = fs::remove_file(&temp_file_path) {
+                                        let old_metadata = match old_file.metadata() {
+                                            Ok(metadata) => metadata,
+                                            Err(err) => {
+                                                self.logger.log(
+                                                    LogLevel::Warn,
+                                                    format!("failed to update file times: failed to get metadata for original file {old_file_path:?}: {err}").as_str(),
+                                                );
+                                                return;
+                                            },
+                                        };
+                                        let new_metadata = match temp_file.metadata() {
+                                            Ok(metadata) => metadata,
+                                            Err(err) => {
+                                                self.logger.log(
+                                                    LogLevel::Warn,
+                                                    format!("failed to update file times: failed to get metadata for temp file {temp_file_path:?}: {err}").as_str(),
+                                                );
+                                                return;
+                                            },
+                                        };
+                                        // SAFETY: This section is conditionally compiled for windows so
+                                        // setting/getting the file creation time should not error.
+                                        let times = fs::FileTimes::new()
+                                            .set_created(old_metadata.created().unwrap())
+                                            .set_accessed(new_metadata.accessed().unwrap())
+                                            .set_modified(new_metadata.modified().unwrap());
+                                        if let Err(err) = temp_file.set_times(times) {
                                             self.logger.log(
                                                 LogLevel::Warn,
-                                                format!("failed to remove temp file {temp_file_path:?} after costume save failure: {err}").as_str()
+                                                format!("failed to update file times: failed to set times for {temp_file_path:?}: {err}").as_str(),
                                             );
                                         }
-
-                                        // REVERT COSTUME CHANGES
-                                        costume.save.update_metadata(original_metadata);
-                                        costume.file_name = original_file_name;
-                                        costume.in_game_display_name = original_in_game_display_name;
-                                        costume.j2000_timestamp = original_timestamp;
-
-                                        //
-                                        // END CLEANUP
-                                        //
-                                       
-                                        return false;
-                                    }
-
-                                    if let Err(err) = fs::rename(&temp_file_path, &new_file_path) {
-                                        let costume_save_error = AppError::CostumeSaveFailed {
-                                            which: costume_path.clone(),
-                                            source: Some(err),
-                                            message: "failed to rename temp file".to_string(),
-                                        };
-                                        self.logger.log_err_ack_required(costume_save_error);
-
-                                        //
-                                        // BEGIN CLEANUP
-                                        //
-
-                                        // DELETE TEMP FILE
-                                        if let Err(err) = fs::remove_file(&temp_file_path) {
-                                            self.logger.log(
-                                                LogLevel::Warn,
-                                                format!("failed to remove temp file {temp_file_path:?} after costume save failure: {err}").as_str()
-                                            );
-                                        }
-
-                                        // REVERT COSTUME CHANGES
-                                        costume.save.update_metadata(original_metadata);
-                                        costume.file_name = original_file_name;
-                                        costume.in_game_display_name = original_in_game_display_name;
-                                        costume.j2000_timestamp = original_timestamp;
-
-                                        // REVERT NAME OF BACKUP OF ORIGINAL FILE
-                                        if let Err(err) = fs::rename(&old_file_backup_path, old_file_path) {
-                                            // TODO should this be a separate app error?
-                                            let costume_save_error = AppError::CostumeSaveFailed {
-                                                which: costume_path.clone(),
-                                                source: Some(err),
-                                                message: format!(
-                                                    "failed to revert old file backup rename ({:?} --> {:?})",
-                                                    old_file_backup_path,
-                                                    old_file_path
-                                                )
-                                            };
-                                            self.logger.log_err_ack_required(costume_save_error);
-                                        }
-
-                                        //
-                                        // END CLEANUP
-                                        //
-
-                                        return false;
-                                    }
-
-                                    if let Err(err) = fs::remove_file(&old_file_backup_path) {
-                                        self.logger.log(LogLevel::Warn, format!("failed to remove renamed old file path: {err}").as_str());
-                                    }
-
-                                    self.logger.log(LogLevel::Info, format!("successfully saved {new_file_path:?}").as_str());
-
-                                    true
+                                    })();
                                 }
+
+                                // Rename the old file so that we have something to revert to if
+                                // the temp file rename fails.
+                                let mut old_file_backup_path = old_file_path.clone();
+                                old_file_backup_path.set_extension("jpg.CCM_BAK");
+                                if let Err(err) = fs::rename(old_file_path, &old_file_backup_path) {
+                                    let costume_save_error = AppError::CostumeSaveFailed {
+                                        which: costume_path.clone(),
+                                        source: Some(err),
+                                        message: "failed to rename original file".to_string(),
+                                    };
+                                    self.logger.log_err_ack_required(costume_save_error);
+
+                                    //
+                                    // BEGIN CLEANUP
+                                    //
+
+                                    // DELETE TEMP FILE
+                                    if let Err(err) = fs::remove_file(&temp_file_path) {
+                                        self.logger.log(
+                                            LogLevel::Warn,
+                                            format!("failed to remove temp file {temp_file_path:?} after costume save failure: {err}").as_str()
+                                        );
+                                    }
+
+                                    // REVERT COSTUME CHANGES
+                                    costume.save.update_metadata(original_metadata);
+                                    costume.file_name = original_file_name;
+                                    costume.in_game_display_name = original_in_game_display_name;
+                                    costume.j2000_timestamp = original_timestamp;
+
+                                    //
+                                    // END CLEANUP
+                                    //
+
+                                    return false;
+                                }
+
+                                if let Err(err) = fs::rename(&temp_file_path, &new_file_path) {
+                                    let costume_save_error = AppError::CostumeSaveFailed {
+                                        which: costume_path.clone(),
+                                        source: Some(err),
+                                        message: "failed to rename temp file".to_string(),
+                                    };
+                                    self.logger.log_err_ack_required(costume_save_error);
+
+                                    //
+                                    // BEGIN CLEANUP
+                                    //
+
+                                    // DELETE TEMP FILE
+                                    if let Err(err) = fs::remove_file(&temp_file_path) {
+                                        self.logger.log(
+                                            LogLevel::Warn,
+                                            format!("failed to remove temp file {temp_file_path:?} after costume save failure: {err}").as_str()
+                                        );
+                                    }
+
+                                    // REVERT COSTUME CHANGES
+                                    costume.save.update_metadata(original_metadata);
+                                    costume.file_name = original_file_name;
+                                    costume.in_game_display_name = original_in_game_display_name;
+                                    costume.j2000_timestamp = original_timestamp;
+
+                                    // REVERT NAME OF BACKUP OF ORIGINAL FILE
+                                    if let Err(err) = fs::rename(&old_file_backup_path, old_file_path) {
+                                        // TODO should this be a separate app error?
+                                        let costume_save_error = AppError::CostumeSaveFailed {
+                                            which: costume_path.clone(),
+                                            source: Some(err),
+                                            message: format!(
+                                                "failed to revert old file backup rename ({:?} --> {:?})",
+                                                old_file_backup_path,
+                                                old_file_path
+                                            )
+                                        };
+                                        self.logger.log_err_ack_required(costume_save_error);
+                                    }
+
+                                    //
+                                    // END CLEANUP
+                                    //
+
+                                    return false;
+                                }
+
+                                if let Err(err) = fs::remove_file(&old_file_backup_path) {
+                                    self.logger.log(LogLevel::Warn, format!("failed to remove renamed old file path: {err}").as_str());
+                                }
+
+                                self.logger.log(LogLevel::Info, format!("successfully saved {new_file_path:?}").as_str());
+
+                                true
                             })();
 
                             // NOTE we should always inform the scanning thread that we potentially
