@@ -2,23 +2,10 @@
 
 # Champions Costume Manager 2
 
-NOTE: This documentation is slightly outdated. Usage information relates to the
-command-line tool found at the `cmdline-tool` tag. `main` currently contains GUI
-development.
+An offline tool for managing in-game displays of costume save files in
+Champions Online.
 
-An offline tool for managing in-game displays of costume save files in Champions
-Online. This will initially be a command-line tool but the plan is to eventually
-have a functional GUI serve as the primary form of user interaction.
-
-![demo gif](./images/demo.gif)
-
-Note that since Champions Online primarily targets Windows that is also
-currently the primary target of this application. At the moment the command-line
-tool _should_ work on Linux, though it is untested and some features may be
-missing (e.g. file creation time copying). If there are enough people who play
-Champions Online via Linux who also want to use this tool, I will see about
-adding true cross-platform support. Until then, assume that upcoming GUI
-features will be Windows-specific.
+![gui-general.jpg](./images/gui-general.jpg)
 
 This tool is still early in development, so use at your own risk! If you're
 paranoid and want to protect your saves, back them up! Save files can be found
@@ -34,7 +21,7 @@ at the following location:
     - [Requirements](#requirements)
     - [Installation](#installation)
 - [Usage](#usage)
-- [Contributing](#contributing)
+    - [Features](#features)
 
 ## Why?
 Champions Online has an amazing character ("costume" in Champions parlance)
@@ -63,60 +50,54 @@ Currently the only way to run this tool is to compile the source yourself and
 releases will be utilized to distribute pre-compiled binaries.
 
 ### Requirements
-- [Rust (1.84.0 is what I'm currently using) and Cargo](https://www.rust-lang.org/tools/install)
+- [Rust (1.84.0+) and Cargo](https://www.rust-lang.org/tools/install)
 
 ### Installation
 1. Clone this repository.
 2. Run `cargo b` (for development/debugging) or `cargo b --release`.
-3. Add `./target/debug` or `./target/release` to your PATH (or move the
-   executable to wherever you want first then add _that_ directory to your
-   PATH).
-
-Note: You can also just `cargo r -- <application arguments>` but this is fairly
-cumbersome if you plan on actually using the tool. If you're actually developing
-then I recommend adding the path to whatever test file you're using as an
-environment variable.
+3. Run `cargo r` or execute the `ccm` executable directly.
 
 ## Usage
-```
-Usage: ccm.exe <costume save file path> [options]
+Upon launching the program for the first time, if your costume save directory
+is not detected you will have to set it manually by clicking the "Change"
+button near where the current costume directory is reported in the top left.
 
--h, --help
-    Show this usage information.
+From there, usage is fairly simple: click on save files and manage them in the
+rightmost panel. At the moment there are no confirmation dialogs for
+saving/deleting files so be careful!
 
--c, --set-character-name <character_name>
-    Set the character name that will be displayed in-game.
+The rightmost panel displays the following information:
+- File Name: The name of the file as it appears on disk.
+- In-Game Display: The name of the save as it will appear in-game.
+- Save Name: An editable field which is just the file name excluding the timestamp.
+- Account Name: An editable field containing the account name as encoded within the save file.
+- Character Name: An editable field containing the character name as encoded within the save file.
 
--a, --set-account-name <account_name>
-    Set the account name that will be displayed in-game.
+##### A Note Regarding Costume Save Display Names
 
--s, --set-save-name <save_name>
-    Set the portion of the filename between the "Costume_" prefix and the j2000
-    timestamp suffix (if it exists).
+Display names of costumes are constructed of the following:
+- The account name as encoded within the costume's JPG save file (specifically
+  the first IPTC caption dataset in the APP13 segment).
+- The character name as encoded within the costume's JPG save file (specifically
+  the second IPTC caption dataset in the APP13 segment).
+- The J2000 timestamp at the end of the filename.
 
--t, --strip-timestamp
-    Strips the j2000 timestamp suffix from the save file name, removing the date
-    display from its entry in the in-game save menu. If there is no j2000
-    timestamp or if the timestamp is invalid, this is effectively a no-op.
-    NOTE: If you want to re-add an in-game date display, you will need to
-    calculate your own j2000 timestamp and append it to the end of the file name
-    yourself in the form "_<timestamp>".
+Hence, editing the in-game display name involves editing those particular
+fields in the GUI.
 
--i, --inspect [short|long]
-    Print file name, in-game save display, and costume metadata. Defaults to
-    short if no specification is supplied. Long will print the costume hash and
-    proprietary costume specification as well as all the information that short
-    displays.
-    If this option is supplied in conjunction with mutative options such as
-    --set-character-name or --strip-timestamp, the mutative options are applied
-    first then the updated information is inspected and displayed.
+### Features
+- Autodetection of new/deleted costume saves, so you can keep the application
+  open while working on costumes.
+- Sort files by name, creation time, or modification time.
+- Delete costume saves from within the GUI application. Careful! There is
+  currently no confirmation dialog for this.
+- Ctrl+Click or Shift+Click to select multiple saves, currently just for
+  mass-deletion.
+- Costume specification editing (EXPERIMENTAL AND DANGEROUS). Note that this
+  will NOT allow you to use costumes you have NOT unlocked in-game. The game
+  has checks for it. I just included it because why not? Maybe someone will
+  find a use for it. For reference, a screenshot of what the costume
+  specification actually looks like is included below.
 
---dry-run
-    Applies mutative options to the in-memory costume save but does not write
-    the results to disk. Use in conjunction with --inspect to see the results of
-    potential changes. This option does not need to be specified if no mutative
-    options are used.
-```
-
-## Contributing
-This project isn't far enough along to accept contributions yet.
+The costume specification editor:
+![Costume Specification Editor](./images/costume-spec.jpg)
